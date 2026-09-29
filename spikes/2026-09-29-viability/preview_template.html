@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Setup Preview</title>
+<script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
+<style>
+  :root { --bg:#fbfbfa; --panel:#ffffff; --ink:#1d1d1b; --muted:#6b6b66; --line:#e6e5e0;
+          --up:#1f8a5b; --down:#c2453d; --accent:#2b5cd6; --warn:#b7791f; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#141413; --panel:#1c1c1a; --ink:#ecebe6; --muted:#9a9990;
+          --line:#2c2c29; --up:#3fb67f; --down:#e0645b; --accent:#6d93f2; --warn:#e0a948; } }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header { padding:16px 20px; border-bottom:1px solid var(--line); display:flex; gap:16px; align-items:baseline; flex-wrap:wrap; }
+  header h1 { font-size:16px; margin:0; font-weight:600; }
+  header span { color:var(--muted); font-size:12px; }
+  .wrap { display:grid; grid-template-columns: 220px 1fr 300px; min-height:calc(100vh - 54px); }
+  nav { border-right:1px solid var(--line); padding:8px; }
+  nav button { display:flex; justify-content:space-between; width:100%; background:none; border:0; color:var(--ink);
+               padding:10px 12px; border-radius:6px; cursor:pointer; font:inherit; text-align:left; }
+  nav button:hover { background:var(--line); }
+  nav button.on { background:var(--panel); box-shadow:0 0 0 1px var(--line); font-weight:600; }
+  nav .dd { color:var(--down); font-variant-numeric:tabular-nums; }
+  main { padding:12px; display:flex; flex-direction:column; gap:8px; min-width:0; }
+  #price { flex:3; min-height:320px; } #rsi { flex:1; min-height:130px; }
+  aside { border-left:1px solid var(--line); padding:16px; display:flex; flex-direction:column; gap:14px; }
+  .k { color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:.04em; }
+  .row { display:flex; justify-content:space-between; font-variant-numeric:tabular-nums; padding:3px 0; }
+  .tag { display:inline-block; padding:2px 8px; border-radius:99px; font-size:12px; border:1px solid var(--line); }
+  .ok { color:var(--up); } .bad { color:var(--down); } .warn { color:var(--warn); }
+  .note { color:var(--muted); font-size:12px; }
+  @media (max-width: 900px) { .wrap { grid-template-columns:1fr; } nav { display:flex; overflow-x:auto; border:0; }
+    nav button { width:auto; gap:8px; } aside { border:0; } #price { min-height:300px; } }
+</style>
+</head>
+<body>
+<header><h1>Dislocation setups — spike preview</h1><span>Throwaway prototype · data as of last close · not financial advice</span></header>
+<div class="wrap">
+  <nav id="list"></nav>
+  <main><div id="price"></div><div id="rsi"></div></main>
+  <aside id="card"></aside>
+</div>
+<script>
+const DATA = __DATA__;
+const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const pct = v => v == null ? "–" : (v * 100).toFixed(1) + "%";
+const opts = () => ({ layout:{ background:{ color:"transparent" }, textColor:css("--muted") },
+  grid:{ vertLines:{ color:css("--line") }, horzLines:{ color:css("--line") } },
+  rightPriceScale:{ borderColor:css("--line") }, timeScale:{ borderColor:css("--line") }, autoSize:true });
+let pc, rc;
+function render(t) {
+  const s = DATA[t];
+  document.querySelectorAll("nav button").forEach(b => b.classList.toggle("on", b.dataset.t === t));
+  document.getElementById("price").innerHTML = ""; document.getElementById("rsi").innerHTML = "";
+  pc = LightweightCharts.createChart(document.getElementById("price"), opts());
+  rc = LightweightCharts.createChart(document.getElementById("rsi"), opts());
+  const cs = pc.addCandlestickSeries({ upColor:css("--up"), downColor:css("--down"), borderVisible:false,
+    wickUpColor:css("--up"), wickDownColor:css("--down") });
+  cs.setData(s.candles);
+  const L = s.levels;
+  [["Entry", L.entry, css("--accent")], ["Stop", L.stop, css("--down")], ["T1 38%", L.t1, css("--up")],
+   ["T2 50%", L.t2, css("--up")], ["63d high", L.high63, css("--muted")]].forEach(([title, price, color]) =>
+    cs.createPriceLine({ price, color, lineWidth:1, lineStyle:title === "Entry" ? 0 : 2, axisLabelVisible:true, title }));
+  const rs = rc.addLineSeries({ color:css("--accent"), lineWidth:1.5 });
+  rs.setData(s.rsi);
+  [30, 70].forEach(p => rs.createPriceLine({ price:p, color:css("--muted"), lineWidth:1, lineStyle:2 }));
+  if (s.div.on) {
+    const pl = pc.addLineSeries({ color:css("--warn"), lineWidth:2, lastValueVisible:false, priceLineVisible:false });
+    pl.setData([{ time:s.div.prev, value:s.div.p_prev }, { time:s.div.cur, value:s.div.p_cur }]);
+    const rl = rc.addLineSeries({ color:css("--warn"), lineWidth:2, lastValueVisible:false, priceLineVisible:false });
+    rl.setData([{ time:s.div.prev, value:s.div.r_prev }, { time:s.div.cur, value:s.div.r_cur }]);
+    cs.setMarkers([{ time:s.div.cur, position:"belowBar", color:css("--warn"), shape:"arrowUp", text:"Bull div" }]);
+  }
+  pc.timeScale().subscribeVisibleLogicalRangeChange(r => r && rc.timeScale().setVisibleLogicalRange(r));
+  pc.timeScale().fitContent();
+  const f = s.facts, shock = f.worst_day <= -0.07;
+  const good = f.fund === "intact" && (f.ctx === "market-correction" || !shock);
+  const rr = ((L.t2 - L.entry) / (L.entry - L.stop)).toFixed(1);
+  document.getElementById("card").innerHTML = `
+    <div><div class="k">${f.sector} · ${f.ctx}</div><div style="font-size:22px;font-weight:600">${t}
+      <span class="tag ${good ? "ok" : "warn"}">${good ? "Candidate" : "Caution"}</span></div></div>
+    <div><div class="k">Why it's down</div>
+      <div class="row"><span>From 63d high</span><span class="bad">${pct(f.dd)}</span></div>
+      <div class="row"><span>vs sector (63d)</span><span class="bad">${pct(f.rel)}</span></div>
+      <div class="row"><span>Worst single day</span><span class="${shock ? "bad" : ""}">${pct(f.worst_day)}</span></div>
+      <div class="note">${shock ? "Drop includes a ≥7% shock day — likely news the reported numbers don't show yet. Historically ~coin flip." : "Gradual drift, no shock day — the pattern that recovered best in the study."}</div></div>
+    <div><div class="k">Why it's quality</div>
+      <div class="row"><span>Revenue TTM YoY</span><span class="${f.rev_yoy > 0 ? "ok" : "bad"}">${pct(f.rev_yoy)}</span></div>
+      <div class="row"><span>Revenue last Q YoY</span><span class="${f.rev_q_yoy > 0 ? "ok" : "bad"}">${pct(f.rev_q_yoy)}</span></div>
+      <div class="row"><span>Profit TTM YoY</span><span class="${f.prof_yoy > 0 ? "ok" : "bad"}">${pct(f.prof_yoy)}</span></div>
+      <div class="row"><span>Fundamentals</span><span class="${f.fund === "intact" ? "ok" : "bad"}">${f.fund}</span></div></div>
+    <div><div class="k">Entry trigger</div>
+      <div class="row"><span>RSI bull div (daily)</span><span class="${s.div.on ? "ok" : ""}">${s.div.on ? "yes" : "no"}</span></div>
+      <div class="row"><span>RSI bull div (weekly)</span><span class="${f.div_w ? "ok" : ""}">${f.div_w ? "yes" : "no"}</span></div></div>
+    <div><div class="k">Plan</div>
+      <div class="row"><span>Entry</span><span>${L.entry}</span></div>
+      <div class="row"><span>Stop</span><span class="bad">${L.stop}</span></div>
+      <div class="row"><span>Target 1 / 2</span><span class="ok">${L.t1} / ${L.t2}</span></div>
+      <div class="row"><span>Reward : risk (T2)</span><span>${rr}</span></div></div>`;
+}
+const nav = document.getElementById("list");
+Object.entries(DATA).forEach(([t, s]) => {
+  const b = document.createElement("button"); b.dataset.t = t;
+  b.innerHTML = `<span>${t}</span><span class="dd">${pct(s.facts.dd)}</span>`;
+  b.onclick = () => render(t); nav.appendChild(b);
+});
+render(Object.keys(DATA)[0]);
+</script>
+</body>
+</html>
