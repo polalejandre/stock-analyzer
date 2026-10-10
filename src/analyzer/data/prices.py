@@ -10,7 +10,7 @@ from typing import Protocol
 
 import pandas as pd
 
-from analyzer.data.http import FetchError, HttpClient, NotFound
+from analyzer.data.http import HttpClient
 
 log = logging.getLogger(__name__)
 
@@ -43,7 +43,7 @@ def _yf_download(symbols: list[str], start: date, end: date) -> pd.DataFrame:
 def _normalize_dates(values) -> pd.Series:
     d = pd.to_datetime(pd.Series(values))
     if d.dt.tz is not None:
-        d = d.dt.tz_convert(None)
+        d = d.dt.tz_localize(None)  # keep the exchange-local wall date
     return d.dt.normalize().astype("datetime64[ns]")
 
 
@@ -66,6 +66,7 @@ def _split_yf_frame(raw: pd.DataFrame, symbols: Sequence[str]) -> dict[str, pd.D
             continue
         f = f.reset_index()
         f["date"] = _normalize_dates(f.iloc[:, 0])
+        f["volume"] = f["volume"].astype("float64")
         out[sym] = f[PRICE_COLUMNS].sort_values("date").reset_index(drop=True)
     return out
 
@@ -83,11 +84,9 @@ class YFinancePrices:
         for i in range(0, len(symbols), self.batch_size):
             batch = symbols[i : i + self.batch_size]
             try:
-                raw = self._download(batch, start, end)
+                out.update(_split_yf_frame(self._download(batch, start, end), batch))
             except Exception as exc:  # yfinance raises many unrelated exception types
                 log.warning("yfinance batch of %d failed: %s", len(batch), exc)
-                continue
-            out.update(_split_yf_frame(raw, batch))
         return out
 
 
@@ -95,8 +94,13 @@ NASDAQ_URL = "https://api.nasdaq.com/api/quote/{symbol}/historical"
 
 
 def _num(text) -> float:
+    if text is None:
+        return float("nan")
     t = str(text).replace("$", "").replace(",", "").strip()
-    return float(t) if t and t.upper() != "N/A" else float("nan")
+    try:
+        return float(t)
+    except ValueError:  # "", "N/A", "--" and other non-numbers
+        return float("nan")
 
 
 def _parse_nasdaq_rows(rows: list[dict]) -> pd.DataFrame:
@@ -111,6 +115,7 @@ def _parse_nasdaq_rows(rows: list[dict]) -> pd.DataFrame:
             "volume": [_num(r.get("volume")) for r in rows],
         }
     )
+    f["volume"] = f["volume"].astype("float64")
     return f.dropna(subset=["close"]).sort_values("date").reset_index(drop=True)[PRICE_COLUMNS]
 
 
@@ -125,7 +130,7 @@ class NasdaqPrices:
         for sym in symbols:
             try:
                 frame = self._fetch_one(sym, start, end)
-            except (FetchError, NotFound, ValueError, KeyError, TypeError) as exc:
+            except Exception as exc:  # one bad symbol must not abort the chain
                 log.warning("nasdaq %s failed: %s", sym, exc)
                 continue
             if frame is not None and not frame.empty:
@@ -161,7 +166,11 @@ def fetch_with_fallback(
     for provider in providers:
         if not remaining:
             break
-        got = provider.fetch(remaining, start, end)
+        try:
+            got = provider.fetch(remaining, start, end)
+        except Exception as exc:  # a broken provider must not stop the chain
+            log.warning("price provider %s failed: %s", provider.name, exc)
+            continue
         for sym, frame in got.items():
             result.frames[sym] = frame
             result.sources[sym] = provider.name

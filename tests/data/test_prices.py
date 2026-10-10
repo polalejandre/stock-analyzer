@@ -37,6 +37,8 @@ def test_yfinance_splits_batch_and_drops_missing_symbols():
     assert list(f.columns) == PRICE_COLUMNS
     assert f["date"].tolist() == [pd.Timestamp("2026-10-08"), pd.Timestamp("2026-10-09")]
     assert f["adj_close"].tolist() == [1.4, 2.4]
+    assert f["date"].dtype == "datetime64[ns]"
+    assert f["volume"].dtype == "float64"
     assert calls == [["AAPL", "DEAD"]]
 
 
@@ -49,6 +51,13 @@ def test_yfinance_batches_symbols():
 
     YFinancePrices(download=download, batch_size=2).fetch(["A", "B", "C"], date(2026, 1, 1), date(2026, 1, 2))
     assert calls == [["A", "B"], ["C"]]
+
+
+def test_yfinance_malformed_frame_yields_empty_without_raising():
+    idx = pd.DatetimeIndex(["2026-10-09"], name="Date")
+    cols = pd.MultiIndex.from_product([["AAPL"], ["Open", "High", "Low", "Volume"]])
+    raw = pd.DataFrame([[1.0, 2.0, 0.5, 100]], index=idx, columns=cols)
+    assert YFinancePrices(download=lambda *a: raw).fetch(["AAPL"], date(2026, 1, 1), date(2026, 1, 2)) == {}
 
 
 def test_yfinance_batch_error_is_skipped():
@@ -95,6 +104,24 @@ def test_nasdaq_falls_back_to_etf_asset_class(tmp_path):
     assert [c["params"]["assetclass"] for c in session.calls] == ["stocks", "etf"]
 
 
+def test_nasdaq_null_cell_keeps_row_with_nan_open(tmp_path):
+    body = {"data": {"tradesTable": {"rows": [
+        {"date": "10/09/2026", "close": "$1,515.62", "volume": "--", "open": None,
+         "high": "$1,520.10", "low": "$1,499.50"},
+    ]}}}
+    client, _ = fake_client(tmp_path, responses=[FakeResponse(json_data=body)])
+    f = NasdaqPrices(client).fetch(["AAPL"], date(2026, 10, 1), date(2026, 10, 9))["AAPL"]
+    assert len(f) == 1
+    assert pd.isna(f["open"].iloc[0])
+    assert f["close"].iloc[0] == 1515.62
+    assert f["volume"].dtype == "float64"
+
+
+def test_nasdaq_non_object_body_leaves_symbol_out(tmp_path):
+    client, _ = fake_client(tmp_path, responses=[FakeResponse(json_data=[1, 2])])
+    assert NasdaqPrices(client).fetch(["AAPL"], date(2026, 10, 1), date(2026, 10, 9)) == {}
+
+
 def test_nasdaq_unknown_symbol_is_left_out(tmp_path):
     client, _ = fake_client(
         tmp_path, responses=[FakeResponse(json_data=NOT_FOUND), FakeResponse(json_data=NOT_FOUND)]
@@ -113,6 +140,20 @@ class StubProvider:
         frame = pd.DataFrame({c: [1.0] for c in PRICE_COLUMNS})
         frame["date"] = pd.Timestamp("2026-10-09")
         return {s: frame for s in symbols if s in self.symbols}
+
+
+class FailingProvider:
+    name = "broken"
+
+    def fetch(self, symbols, start, end):
+        raise RuntimeError("provider down")
+
+
+def test_fallback_chain_survives_a_failing_provider():
+    b = StubProvider("b", ["Y"])
+    res = fetch_with_fallback([FailingProvider(), b], ["Y", "Z"], date(2026, 10, 1), date(2026, 10, 9))
+    assert res.sources == {"Y": "b"}
+    assert res.missing == ["Z"]
 
 
 def test_fallback_chain_asks_next_provider_only_for_missing_symbols():
