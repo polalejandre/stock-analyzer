@@ -1,6 +1,8 @@
+import json
 import sqlite3
-from datetime import date
+from datetime import date, timedelta
 
+import pandas as pd
 import pytest
 
 from analyzer.data.price_sync import (
@@ -10,7 +12,7 @@ from analyzer.data.price_sync import (
     replace_prices,
     sync_prices,
 )
-from analyzer.store.db import connect, migrate
+from analyzer.store.db import connect, get_state, migrate
 from tests.helpers import FakeProvider, bars
 
 TODAY = date(2026, 10, 9)
@@ -226,14 +228,15 @@ def test_adjustment_change_is_still_detected_after_a_fallback_day(conn):
 def test_stale_symbol_is_redownloaded_in_full_and_ignores_old_adjustment_ratio(conn):
     replace_prices(conn, "OLD", bars(["2024-01-02"], [50], adj=[25]), "yfinance")  # last bar > 365 days ago
     nan = float("nan")
-    backup = FakeProvider("nasdaq", {"OLD": bars(["2026-10-01", "2026-10-02"], [60, 61], adj=[nan, nan])})
+    backup = FakeProvider("nasdaq", {"OLD": bars(["2024-01-02", "2026-10-01", "2026-10-02"], [50, 60, 61], adj=[nan] * 3)})
     rep = sync_prices(conn, [FakeProvider("yfinance", {}), backup], ["OLD"], [], TODAY,
                       history_start=date(2020, 1, 1))
     assert rep.updated == ["OLD"] and rep.via_fallback == {"OLD": "nasdaq"}
     assert backup.calls[0][1] == date(2020, 1, 1)
     got = read_prices(conn, "OLD")
-    assert got["close"].tolist() == [60, 61]  # the old row is gone
-    assert got["adj_close"].tolist() == [60, 61]  # and its 0.5 ratio is not carried over
+    assert got["close"].tolist() == [50, 60, 61]
+    assert got["adj_close"].tolist() == [50, 60, 61]  # the old row's 0.5 ratio is not carried over
+    assert set(got["source"]) == {"nasdaq"}
 
 
 def test_duplicate_dates_from_a_provider_do_not_abort_the_sync(conn):
@@ -268,3 +271,177 @@ def test_frame_with_no_usable_rows_never_wipes_stored_history(conn):
     rep = sync_prices(conn, [changed], ["AAPL"], [], TODAY)  # split -> refetch -> only NaN closes back
     assert rep.refetched == [] and rep.missing == ["AAPL"]
     assert read_prices(conn, "AAPL")["close"].tolist() == [10, 11]
+
+
+# ---- fix round 1 ----
+
+def _daily(n, start="2026-09-01", close=100.0):
+    idx = pd.bdate_range(start, periods=n)
+    return bars(list(idx.strftime("%Y-%m-%d")), [close] * n)
+
+
+def test_truncated_primary_response_never_replaces_long_history(conn):
+    stored = _daily(24)  # 2026-09-01 .. 2026-10-02
+    replace_prices(conn, "NVDA", stored, "yfinance")
+    window = bars(["2026-09-18", "2026-09-21", "2026-09-22", "2026-10-01", "2026-10-02", "2026-10-05"],
+                  [50] * 6)  # a split: closes halved, so the incremental check asks for a refetch
+    truncated = bars(["2026-10-01", "2026-10-02", "2026-10-05", "2026-10-06"], [50] * 4)
+    primary = ScriptedProvider("yfinance", [{"NVDA": window}, {"NVDA": truncated}])
+    rep = sync_prices(conn, [primary], ["NVDA"], [], TODAY)
+    assert rep.missing == ["NVDA"] and rep.refetched == [] and rep.updated == []
+    got = read_prices(conn, "NVDA")
+    assert len(got) == 24 and got["close"].tolist() == [100.0] * 24
+
+
+def test_replacement_that_starts_late_is_refused_even_when_long_enough(conn):
+    replace_prices(conn, "NVDA", _daily(24), "yfinance")  # first bar 2026-09-01
+    late = _daily(30, start="2026-09-14", close=50.0)  # more rows, but starts 13 days after the stored start
+    primary = ScriptedProvider("yfinance", [{"NVDA": late}, {"NVDA": late}])
+    rep = sync_prices(conn, [primary], ["NVDA"], [], TODAY)
+    assert rep.missing == ["NVDA"] and rep.refetched == []
+    assert read_prices(conn, "NVDA")["close"].tolist() == [100.0] * 24
+
+
+def test_replace_prices_refuses_a_frame_without_usable_rows(conn):
+    replace_prices(conn, "AAPL", bars(["2026-10-01", "2026-10-02"], [10, 11]), "yfinance")
+    with pytest.raises(ValueError):
+        replace_prices(conn, "AAPL", bars([], []), "yfinance")
+    nan_only = bars(["2026-10-05"], [12])
+    nan_only["close"] = float("nan")
+    with pytest.raises(ValueError):
+        replace_prices(conn, "AAPL", nan_only, "yfinance")
+    assert read_prices(conn, "AAPL")["close"].tolist() == [10, 11]
+
+
+def test_fallback_overlap_that_disagrees_with_stored_closes_is_not_written(conn):
+    replace_prices(conn, "KO", bars(["2026-09-30", "2026-10-01", "2026-10-02"], [100, 100, 100]), "yfinance")
+    nan = float("nan")
+    backup = FakeProvider("nasdaq", {"KO": bars(
+        ["2026-09-30", "2026-10-01", "2026-10-02", "2026-10-05"], [50, 50, 50, 51], adj=[nan] * 4)})
+    rep = sync_prices(conn, [FakeProvider("yfinance", {}), backup], ["KO"], [], TODAY)  # split during an outage
+    assert rep.missing == ["KO"] and rep.updated == [] and rep.via_fallback == {}
+    got = read_prices(conn, "KO")
+    assert got["close"].tolist() == [100, 100, 100] and set(got["source"]) == {"yfinance"}
+
+
+def test_fallback_needs_a_newer_bar_than_the_last_stored_one(conn):
+    replace_prices(conn, "AAPL", bars(["2026-10-01", "2026-10-02"], [10, 11]), "yfinance")  # 10-02 maybe partial
+    nan = float("nan")
+    backup = FakeProvider("nasdaq", {"AAPL": bars(["2026-10-01", "2026-10-02"], [10, 11.5], adj=[nan, nan])})
+    rep = sync_prices(conn, [FakeProvider("yfinance", {}), backup], ["AAPL"], [], TODAY)
+    assert rep.updated == [] and rep.via_fallback == {} and rep.missing == []
+    got = read_prices(conn, "AAPL")
+    assert got["close"].tolist() == [10, 11] and set(got["source"]) == {"yfinance"}
+
+
+def test_fallback_refreshes_the_last_bar_when_it_adds_a_newer_one(conn):
+    replace_prices(conn, "AAPL", bars(["2026-10-01", "2026-10-02"], [10, 11]), "yfinance")
+    nan = float("nan")
+    backup = FakeProvider("nasdaq", {"AAPL": bars(
+        ["2026-10-01", "2026-10-02", "2026-10-05"], [10, 11.5, 12], adj=[nan] * 3)})
+    rep = sync_prices(conn, [FakeProvider("yfinance", {}), backup], ["AAPL"], [], TODAY)
+    assert rep.updated == ["AAPL"] and rep.via_fallback == {"AAPL": "nasdaq"}
+    got = read_prices(conn, "AAPL")
+    assert got["close"].tolist() == [10, 11.5, 12]
+    assert got["source"].tolist() == ["yfinance", "nasdaq", "nasdaq"]
+
+
+def test_microsecond_dates_from_a_primary_still_match_stored_rows(conn):
+    replace_prices(conn, "KO", bars(["2026-09-30", "2026-10-01", "2026-10-02"], [60, 61, 62]), "yfinance")
+    fresh = bars(["2026-09-30", "2026-10-01", "2026-10-02", "2026-10-05"], [60, 61, 62, 63],
+                 adj=[59.4, 60.4, 61.4, 63])
+    fresh["date"] = fresh["date"].astype("datetime64[us]")
+    assert str(fresh["date"].dtype) == "datetime64[us]"
+    rep = sync_prices(conn, [FakeProvider("yfinance", {"KO": fresh})], ["KO"], [], TODAY)
+    assert rep.refetched == ["KO"]
+    assert read_prices(conn, "KO")["adj_close"].tolist() == [59.4, 60.4, 61.4, 63]
+
+
+def test_fallback_built_history_is_replaced_once_the_primary_returns(conn):
+    dates = list(pd.bdate_range("2026-09-01", periods=24).strftime("%Y-%m-%d"))  # ends 2026-10-02
+    replace_prices(conn, "SMH", bars(dates, [100.0] * 24), "nasdaq")  # adj = close, no dividend adjustment
+    real = bars([*dates, "2026-10-05"], [100.0] * 25, adj=[98.0] * 24 + [100.0])
+    primary = FakeProvider("yfinance", {"SMH": real})
+    rep = sync_prices(conn, [primary], ["SMH"], [], TODAY)
+    assert rep.refetched == ["SMH"] and rep.updated == [] and rep.via_fallback == {}
+    got = read_prices(conn, "SMH")
+    assert len(got) == 25 and set(got["source"]) == {"yfinance"}
+    assert got["adj_close"].tolist() == [98.0] * 24 + [100.0]
+    assert primary.calls[-1][1] == date(2009, 1, 1)  # a full-history request
+    # healed: the next run is an ordinary incremental one
+    again = sync_prices(conn, [primary], ["SMH"], [], TODAY)
+    assert again.updated == ["SMH"] and again.refetched == []
+
+
+def test_fallback_rows_inside_the_window_do_not_force_a_heal(conn):
+    replace_prices(conn, "KO", bars(["2026-09-29", "2026-09-30", "2026-10-01"], [100] * 3), "yfinance")
+    nan = float("nan")
+    backup = FakeProvider("nasdaq", {"KO": bars(["2026-10-01", "2026-10-02"], [100, 101], adj=[nan, nan])})
+    sync_prices(conn, [FakeProvider("yfinance", {}), backup], ["KO"], [], TODAY)
+    primary = FakeProvider("yfinance", {"KO": bars(
+        ["2026-09-29", "2026-09-30", "2026-10-01", "2026-10-02", "2026-10-05"], [100, 100, 100, 101, 102])})
+    rep = sync_prices(conn, [primary], ["KO"], [], TODAY)
+    assert rep.refetched == [] and rep.updated == ["KO"]
+    assert set(read_prices(conn, "KO")["source"]) == {"yfinance"}
+
+
+def test_one_stuck_symbol_does_not_widen_the_window_for_the_others(conn):
+    current = ["2026-10-07", "2026-10-08"]
+    for sym in ("AAA", "BBB"):
+        replace_prices(conn, sym, bars(current, [10, 11]), "yfinance")
+    replace_prices(conn, "STUCK", bars(["2026-03-23"], [5]), "yfinance")  # 200 days old, not yet stale
+    data = {sym: bars([*current, "2026-10-09"], [10, 11, 12]) for sym in ("AAA", "BBB")}
+    data["STUCK"] = bars(["2026-03-23"], [5])
+    primary = FakeProvider("yfinance", data)
+    rep = sync_prices(conn, [primary], ["AAA", "BBB", "STUCK"], [], TODAY)
+    assert sorted(rep.updated) == ["AAA", "BBB", "STUCK"]
+    by_start = {start: symbols for symbols, start, _ in primary.calls}
+    assert by_start == {
+        date(2026, 9, 24): ("AAA", "BBB"),  # last 10-08 - 14 days
+        date(2026, 3, 9): ("STUCK",),  # last 03-23 - 14 days
+    }
+
+
+def test_missed_historical_symbols_are_not_requested_again_for_30_days(conn):
+    primary = FakeProvider("yfinance", {})
+    first = sync_prices(conn, [primary], ["AAPL"], ["OLD"], TODAY)
+    assert first.historical_missing == ["OLD"] and first.missing == ["AAPL"]
+    assert json.loads(get_state(conn, "price_historical_misses")) == {"OLD": "2026-10-09"}
+    assert primary.calls == [(("AAPL", "OLD"), date(2009, 1, 1), TODAY)]
+
+    later = TODAY + timedelta(days=29)
+    second = sync_prices(conn, [primary], ["AAPL"], ["OLD"], later)
+    assert second.historical_missing == ["OLD"]  # still unknown, just not requested
+    assert second.missing == ["AAPL"]  # active symbols are never skipped
+    assert primary.calls[1] == (("AAPL",), date(2009, 1, 1), later)
+
+    retry_day = TODAY + timedelta(days=30)
+    primary.data["OLD"] = bars(["2015-01-02"], [5])
+    third = sync_prices(conn, [primary], [], ["OLD"], retry_day)
+    assert third.updated == ["OLD"] and third.historical_missing == []
+    assert primary.calls[2][0] == ("OLD",)
+    assert json.loads(get_state(conn, "price_historical_misses")) == {}
+
+
+def test_a_still_missing_historical_symbol_restarts_its_30_day_clock(conn):
+    primary = FakeProvider("yfinance", {})
+    sync_prices(conn, [primary], [], ["OLD"], TODAY)
+    retry_day = TODAY + timedelta(days=30)
+    sync_prices(conn, [primary], [], ["OLD"], retry_day)
+    assert len(primary.calls) == 2
+    sync_prices(conn, [primary], [], ["OLD"], retry_day + timedelta(days=1))
+    assert len(primary.calls) == 2
+    assert json.loads(get_state(conn, "price_historical_misses")) == {"OLD": retry_day.isoformat()}
+
+
+def test_negative_cache_ignores_malformed_state_and_other_symbols(conn):
+    from analyzer.store.db import set_state
+
+    set_state(conn, "price_historical_misses", "not json")
+    primary = FakeProvider("yfinance", {"OLD": bars(["2015-01-02"], [5])})
+    rep = sync_prices(conn, [primary], [], ["OLD"], TODAY)
+    assert rep.updated == ["OLD"]
+    set_state(conn, "price_historical_misses", json.dumps({"OTHER": "2026-10-01", "BAD": "garbage"}))
+    rep = sync_prices(conn, [primary], [], ["NEW"], TODAY)
+    assert rep.historical_missing == ["NEW"]
+    assert json.loads(get_state(conn, "price_historical_misses")) == {"OTHER": "2026-10-01", "NEW": "2026-10-09"}
