@@ -10,6 +10,15 @@ import pandas as pd
 from analyzer.data.edgar.tags import CONCEPT_BY_NAME
 
 _OUT = ["cik", "tag", "period_start", "period_end", "value", "filed", "accession"]
+# Datetime resolution of parsed ISO dates; pandas picks it (us in pandas 3, ns in pandas 2).
+# Every date column is cast to it so that an all-NaT period_start and an empty result match.
+_DT = pd.to_datetime(pd.Series(["2000-01-01"])).dtype
+
+
+def _empty() -> pd.DataFrame:
+    dtypes = {"cik": "int64", "tag": "str", "period_start": _DT, "period_end": _DT,
+              "value": "float64", "filed": _DT, "accession": "str"}
+    return pd.DataFrame({c: pd.Series(dtype=dtypes[c]) for c in _OUT})
 
 
 def load_concept(
@@ -19,7 +28,12 @@ def load_concept(
     as_of: date | None = None,
     merges: Mapping[int, Sequence[int]] | None = None,
 ) -> pd.DataFrame:
-    """One value per period, as it was known on `as_of` (default: everything filed)."""
+    """One value per period, as it was known on `as_of` (default: everything filed).
+
+    Raises KeyError for a concept name that is not in the tag map.
+    """
+    if concept not in CONCEPT_BY_NAME:
+        raise KeyError(f"unknown concept {concept!r}")
     ciks = [cik, *(merges or {}).get(cik, [])]
     sql = (f"SELECT {', '.join(_OUT)} FROM facts WHERE concept = ? "
            f"AND cik IN ({', '.join('?' * len(ciks))})")
@@ -29,7 +43,7 @@ def load_concept(
         params.append(as_of.isoformat())
     df = pd.read_sql_query(sql, conn, params=params)
     if df.empty:
-        return pd.DataFrame(columns=_OUT)
+        return _empty()
     priority = {t: i for i, t in enumerate(CONCEPT_BY_NAME[concept].tags)}
     df["prio"] = df["tag"].map(priority).fillna(len(priority))
     df["foreign"] = (df["cik"] != cik).astype(int)
@@ -37,9 +51,9 @@ def load_concept(
     df = df.sort_values(["period_start", "period_end", "foreign", "prio", "filed", "accession"],
                         ascending=[True, True, True, True, False, False])
     df = df.drop_duplicates(["period_start", "period_end"], keep="first")
-    df["period_start"] = pd.to_datetime(df["period_start"].mask(df["period_start"] == ""))
-    df["period_end"] = pd.to_datetime(df["period_end"])
-    df["filed"] = pd.to_datetime(df["filed"])
+    df["period_start"] = pd.to_datetime(df["period_start"].mask(df["period_start"] == "")).astype(_DT)
+    df["period_end"] = pd.to_datetime(df["period_end"]).astype(_DT)
+    df["filed"] = pd.to_datetime(df["filed"]).astype(_DT)
     return df.sort_values(["period_end", "period_start"]).reset_index(drop=True)[_OUT]
 
 
