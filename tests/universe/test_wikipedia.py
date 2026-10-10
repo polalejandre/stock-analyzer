@@ -273,6 +273,33 @@ def test_historical_month_failing_three_runs_is_skipped_on_the_fourth(tmp_path, 
     assert json.loads(get_state(conn, "wiki_month_failures")) == {"sp500 2026-09-01": 3}
 
 
+def test_an_outage_never_gives_up_on_unfetched_months(tmp_path):
+    """Wikipedia down for days: today's snapshot fails too, so no month failure is counted."""
+    conn = connect(tmp_path / "t.db")
+    migrate(conn)
+    start = date(2026, 8, 1)
+    for n in range(5):
+        down, _ = _broken_month_client(tmp_path / str(n), "")  # every request fails
+        result = sync_index_snapshots(conn, down, "sp500", date(2026, 10, 10 + n), start=start)
+        assert result.skipped == []
+        assert len(result.failed) == 4                  # three month starts and today
+    assert json.loads(get_state(conn, "wiki_month_failures") or "{}") == {}
+    up, _ = _broken_month_client(tmp_path / "up", "1999-01-01")
+    result = sync_index_snapshots(conn, up, "sp500", date(2026, 10, 15), start=start)
+    assert result.failed == [] and result.attempted == 4   # the months are still fetched
+
+
+def test_same_day_reruns_count_a_month_failure_once(tmp_path):
+    client, session = _broken_month_client(tmp_path, "2026-09-01")
+    conn = connect(tmp_path / "t.db")
+    migrate(conn)
+    for _ in range(4):
+        result = sync_index_snapshots(conn, client, "sp500", date(2026, 10, 10), start=date(2026, 8, 1))
+        assert result.skipped == []
+    assert _asked(session, "2026-09-01") == 4
+    assert json.loads(get_state(conn, "wiki_month_failures")) == {"sp500 2026-09-01": 1}
+
+
 def test_a_month_that_recovers_clears_its_failure_count(tmp_path):
     conn = connect(tmp_path / "t.db")
     migrate(conn)

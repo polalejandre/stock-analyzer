@@ -21,7 +21,11 @@ PAGES = {"sp500": "List_of_S&P_500_companies", "sp400": "List_of_S&P_400_compani
 EXPECTED_SIZE = {"sp500": (480, 520), "sp400": (380, 420)}  # sanity bounds per snapshot
 SNAPSHOT_START = {"sp500": date(2010, 1, 1), "sp400": date(2013, 1, 1)}
 MONTH_FAILURES_KEY = "wiki_month_failures"  # sync_state: JSON {"sp500 2013-04-01": failures}
-MONTH_FAILURE_LIMIT = 3  # a historical month failing this many runs in a row is given up on
+MONTH_FAILURE_LIMIT = 3  # a historical month failing on this many counted days is given up on
+# sync_state: the last day an index's historical failures were counted. A failure counts only in a
+# run whose today's snapshot succeeded (Wikipedia was reachable) and at most once per day, so an
+# outage or a few same-day reruns never give up on months that were never really broken.
+MONTH_FAILURES_DAY_KEY = "wiki_month_failures_day {}"
 
 
 log = logging.getLogger(__name__)
@@ -169,6 +173,8 @@ def sync_index_snapshots(
     failures = _load_failures(conn)
     before = dict(failures)
     today_ok = today.isoformat() in have
+    today_fetched = False
+    failed_months: list[str] = []
     for d in targets:
         item = f"{index_name} {d}"
         historical = d != today  # today's snapshot is never given up on
@@ -182,10 +188,7 @@ def sync_index_snapshots(
         except Exception as exc:  # one bad month must not stop the rest
             result.failed.append((item, f"{type(exc).__name__}: {exc}"))
             if historical:
-                failures[item] = failures.get(item, 0) + 1
-                if failures[item] == MONTH_FAILURE_LIMIT:
-                    log.warning("giving up on the %s snapshot after %d consecutive failed runs; "
-                                "it is no longer requested", item, MONTH_FAILURE_LIMIT)
+                failed_months.append(item)
             continue
         failures.pop(item, None)
         rows = [(index_name, d.isoformat(), rev.revid, r.ticker, r.security, r.gics_sector,
@@ -196,7 +199,16 @@ def sync_index_snapshots(
                 (index_name, d.isoformat()),
             )
             conn.executemany("INSERT INTO index_snapshots VALUES (?,?,?,?,?,?,?,?)", rows)
-        today_ok = today_ok or d == today
+        if d == today:
+            today_ok = today_fetched = True
+    day_key = MONTH_FAILURES_DAY_KEY.format(index_name)
+    if failed_months and today_fetched and get_state(conn, day_key) != today.isoformat():
+        for item in failed_months:
+            failures[item] = failures.get(item, 0) + 1
+            if failures[item] == MONTH_FAILURE_LIMIT:
+                log.warning("giving up on the %s snapshot after %d failed days; "
+                            "it is no longer requested", item, MONTH_FAILURE_LIMIT)
+        set_state(conn, day_key, today.isoformat())
     if failures != before:
         set_state(conn, MONTH_FAILURES_KEY, json.dumps(dict(sorted(failures.items()))))
     if today_ok:
