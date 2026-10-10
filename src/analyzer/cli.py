@@ -1,12 +1,21 @@
 """Command-line entry point: `analyzer ...`."""
 
 import logging
+import time
 from datetime import date
 
 import typer
 
 from analyzer.config import ConfigError, load_rules, load_settings
+from analyzer.data.clients import make_clients
+from analyzer.data.edgar.companies import load_ticker_map
+from analyzer.data.edgar.merges import load_cik_merges
+from analyzer.data.http import FetchError, NotFound
+from analyzer.pipeline.audit import actionable, missing_reference_etfs, summarize
+from analyzer.pipeline.audit import audit as run_audit
 from analyzer.pipeline.update import STEPS, build_context, run_update
+from analyzer.store.db import connect, migrate
+from analyzer.universe.members import price_symbols
 
 app = typer.Typer(help="Stock Analyzer engine.", no_args_is_help=True)
 
@@ -75,3 +84,65 @@ def update(
         typer.echo(f"FAILED: {r.name} (provider_status not updated)", err=True)
     if unhealthy:
         raise typer.Exit(1)
+
+
+@app.command()
+def audit(
+    tickers: str = typer.Option(None, help="Comma-separated subset."),
+    show_all: bool = typer.Option(False, "--all", help="List every ticker, not only flagged active ones."),
+    today: str = typer.Option(None, help="Override today's date (YYYY-MM-DD)."),
+) -> None:
+    """Report data coverage and problems per ticker."""
+    try:
+        run_day = date.fromisoformat(today) if today else date.today()
+    except ValueError as exc:
+        raise _fail(f"Invalid --today {today!r}: expected YYYY-MM-DD") from exc
+    subset = _parse_tickers(tickers)
+    if subset is not None and not subset:
+        raise _fail(f"--tickers {tickers!r} names no tickers")
+    try:
+        settings = load_settings()
+        rules = load_rules()
+    except Exception as exc:
+        reason = str(exc) if isinstance(exc, ConfigError) else f"{type(exc).__name__}: {exc}"
+        raise _fail(f"Configuration error: {reason}") from exc
+    if not settings.db_path.exists():
+        raise _fail("no database yet \u2014 run `analyzer update` first")
+    started = time.monotonic()
+    conn = connect(settings.db_path)
+    try:
+        migrate(conn)
+        try:
+            ticker_map = load_ticker_map(make_clients(settings).sec)
+        except (FetchError, NotFound, OSError) as exc:  # offline or SEC down
+            typer.echo(f"warning: CIK merges not loaded ({type(exc).__name__}: {exc}); "
+                       "auditing without them", err=True)
+            merges = None
+        else:
+            try:
+                merges = load_cik_merges(ticker_map)
+            except Exception as exc:  # malformed cik_merges.toml etc. is a real problem
+                raise _fail(f"Configuration error: cik merges: {type(exc).__name__}: {exc}") from exc
+        active = set(price_symbols(conn, run_day, rules.universe)[0])
+        if not active and conn.execute("SELECT 1 FROM tickers LIMIT 1").fetchone():
+            typer.echo("warning: no active universe found (run `analyzer update --step universe`); "
+                       "every ticker treated as inactive", err=True)
+        audits = run_audit(
+            conn, run_day, merges, subset, active=active,
+            progress=lambda n, total: typer.echo(f"audited {n}/{total}\u2026", err=True))
+        missing_etfs = missing_reference_etfs(conn)
+    finally:
+        conn.close()
+    for key, value in summarize(audits, missing_etfs).items():
+        typer.echo(f"{key:30} {value}")
+    if missing_etfs:
+        typer.echo(f"reference ETFs without prices: {', '.join(missing_etfs)}")
+    typer.echo("")
+    for a in audits:
+        if show_all or actionable(a):
+            marker = "" if a.active else "inactive "
+            typer.echo(f"{a.ticker:8} cik={a.cik if a.cik is not None else '-':<9} "
+                       f"prices={a.price_first or '-'}..{a.price_last or '-'} "
+                       f"rev_q={a.revenue_quarters:<3} etf={a.sector_etf or '-'}/{a.industry_etf or '-'} "
+                       f"{marker}{'; '.join(a.flags)}".rstrip())
+    typer.echo(f"audited {len(audits)} tickers in {time.monotonic() - started:.1f}s", err=True)
