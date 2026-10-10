@@ -101,7 +101,7 @@ def test_no_fcf_boundary(conn):
 
 
 def test_stale_price_boundary(conn):
-    assert "stale prices" not in audit(conn, date(2026, 10, 12), tickers={"GOOD"})[0].flags  # 4 days
+    assert "stale prices" not in audit(conn, date(2026, 10, 13), tickers={"GOOD"})[0].flags  # 4 days
     assert "stale prices" in audit(conn, date(2026, 10, 14), tickers={"GOOD"})[0].flags  # 5 days
 
 
@@ -200,3 +200,11 @@ def test_cli_audit_argument_errors(conn, monkeypatch, tmp_path):
     result = runner.invoke(cli.app, ["audit"])  # no database yet
     assert result.exit_code == 2 and "analyzer update" in result.stderr
     assert not (tmp_path / "analyzer.db").exists()
+
+
+def test_cli_audit_warns_when_no_active_universe(conn, monkeypatch, tmp_path):
+    _cli_env(monkeypatch, tmp_path, conn, lambda sec: pd.DataFrame())
+    monkeypatch.setattr(cli, "price_symbols", lambda c, d, r: ([], []))
+    result = CliRunner().invoke(cli.app, ARGS)
+    assert result.exit_code == 0
+    assert "warning: no active universe found" in result.stderr

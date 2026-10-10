@@ -124,6 +124,9 @@ def audit(
             except Exception as exc:  # malformed cik_merges.toml etc. is a real problem
                 raise _fail(f"Configuration error: cik merges: {type(exc).__name__}: {exc}") from exc
         active = set(price_symbols(conn, run_day, rules.universe)[0])
+        if not active and conn.execute("SELECT 1 FROM tickers LIMIT 1").fetchone():
+            typer.echo("warning: no active universe found (run `analyzer update --step universe`); "
+                       "every ticker treated as inactive", err=True)
         audits = run_audit(
             conn, run_day, merges, subset, active=active,
             progress=lambda n, total: typer.echo(f"audited {n}/{total}\u2026", err=True))
