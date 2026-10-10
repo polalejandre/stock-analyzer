@@ -8,11 +8,12 @@ It uses free, primary data sources only (SEC EDGAR, FRED, yfinance), and it is f
 
 ## Status
 
-The design is in progress. No product code exists yet.
+The design is complete and awaiting final review. No product code exists yet.
 
-- Design progress and decisions: [`docs/plans/2026-09-29-stock-analyzer-design-progress.md`](docs/plans/2026-09-29-stock-analyzer-design-progress.md)
+- Design spec: [`docs/specs/2026-10-10-stock-analyzer-design.md`](docs/specs/2026-10-10-stock-analyzer-design.md)
+- Design history and decisions: [`docs/plans/2026-09-29-stock-analyzer-design-progress.md`](docs/plans/2026-09-29-stock-analyzer-design-progress.md)
 - Viability spike (throwaway): [`spikes/2026-09-29-viability/`](spikes/2026-09-29-viability/)
 
 ## Planned architecture
 
-A Python engine (data → features → signals → SQLite), a FastAPI backend, and a React + lightweight-charts frontend, run with Docker Compose.
+A Python engine (data → features → signals → SQLite) runs each morning. Claude Code reads its output and the latest filings and writes the analysis. A local, static React + lightweight-charts dashboard shows both. A FastAPI backend and Docker are optional, later additions.
