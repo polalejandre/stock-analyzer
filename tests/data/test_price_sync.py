@@ -605,3 +605,48 @@ def test_incremental_windows_do_not_touch_splits(conn):
                            splits={"AAPL": [(date(2026, 10, 5), 1.0)]})
     sync_prices(conn, [primary], ["AAPL"], [], TODAY)
     assert read_splits(conn, "AAPL") == []
+
+
+# --- final review M13: an interrupted first run keeps the chunks it finished -------------------
+
+def test_full_download_is_written_chunk_by_chunk(conn):
+    from analyzer.data.price_sync import FULL_CHUNK_SIZE
+
+    symbols = [f"S{i:03d}" for i in range(FULL_CHUNK_SIZE + 5)]
+    data = {s: bars(["2026-10-08", "2026-10-09"], [10, 11]) for s in symbols}
+
+    class InterruptedProvider(FakeProvider):
+        def fetch(self, syms, start, end):
+            if len(self.calls) == 1:  # the second chunk
+                raise KeyboardInterrupt
+            return super().fetch(syms, start, end)
+
+    primary = InterruptedProvider("yfinance", data, splits={symbols[0]: [(date(2026, 10, 9), 2.0)]})
+    with pytest.raises(KeyboardInterrupt):
+        sync_prices(conn, [primary], symbols, [], TODAY)
+    assert [len(c[0]) for c in primary.calls] == [FULL_CHUNK_SIZE]
+    stored = set(last_dates(conn, symbols))
+    assert stored == set(symbols[:FULL_CHUNK_SIZE])
+    assert read_splits(conn, symbols[0]) == [(date(2026, 10, 9), 2.0)]
+    # the rerun downloads only what is left
+    primary = FakeProvider("yfinance", data)
+    rep = sync_prices(conn, [primary], symbols, [], TODAY)
+    assert primary.calls[0][0] == tuple(symbols[FULL_CHUNK_SIZE:])
+    assert sorted(rep.updated) == symbols
+    assert set(last_dates(conn, symbols)) == set(symbols)
+
+
+def test_chunked_full_download_reports_fallback_and_missing_across_chunks(conn):
+    from analyzer.data.price_sync import FULL_CHUNK_SIZE
+
+    symbols = [f"S{i:03d}" for i in range(2 * FULL_CHUNK_SIZE + 1)]
+    data = {s: bars(["2026-10-09"], [10]) for s in symbols[:-2]}
+    primary = FakeProvider("yfinance", data)
+    nan = float("nan")
+    backup = FakeProvider("nasdaq", {symbols[-2]: bars(["2026-10-09"], [5], adj=[nan])})
+    rep = sync_prices(conn, [primary, backup], symbols[:-1], [symbols[-1]], TODAY)
+    assert [len(c[0]) for c in primary.calls] == [FULL_CHUNK_SIZE, FULL_CHUNK_SIZE, 1]
+    assert rep.via_fallback == {symbols[-2]: "nasdaq"}
+    assert rep.missing == []
+    assert rep.historical_missing == [symbols[-1]]
+    assert len(rep.updated) == len(symbols) - 1

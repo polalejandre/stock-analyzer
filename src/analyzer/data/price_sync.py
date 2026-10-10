@@ -40,6 +40,7 @@ MISSES_KEY = "price_historical_misses"  # sync_state: JSON {symbol: iso date of 
 MISSES_RETRY_DAYS = 30
 HEAL_REFUSED_KEY = "price_heal_refused"  # sync_state: JSON {symbol: iso date a heal was refused}
 HEAL_RETRY_DAYS = 30
+FULL_CHUNK_SIZE = 200  # full histories are fetched and stored this many symbols at a time
 
 _COLUMNS = ["symbol", "date", "open", "high", "low", "close", "adj_close", "volume", "source"]
 _NUMERIC = ["open", "high", "low", "close", "adj_close", "volume"]
@@ -248,9 +249,11 @@ def _sync_full(conn, providers, full, active_set, today, history_start, report) 
     to_fetch = [s for s in full if s not in skipped]
 
     missing: list[str] = []
-    if to_fetch:
-        res = fetch_with_fallback(providers, to_fetch, history_start, today)
-        missing = list(res.missing)
+    # Chunk by chunk, each written before the next is fetched: an interrupted first run keeps
+    # what it finished, and the rerun only asks for the symbols still not stored.
+    for i in range(0, len(to_fetch), FULL_CHUNK_SIZE):
+        res = fetch_with_fallback(providers, to_fetch[i : i + FULL_CHUNK_SIZE], history_start, today)
+        missing += res.missing
         for sym, frame in res.frames.items():
             if not _replace_checked(conn, sym, frame, res.sources[sym]):
                 missing.append(sym)
