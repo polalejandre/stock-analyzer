@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 import re
 from collections.abc import Collection
@@ -12,7 +13,7 @@ import pandas as pd
 from analyzer.config import UniverseRules
 from analyzer.data.price_sync import HISTORY_START, replace_prices, replace_splits
 from analyzer.data.prices import PriceProvider, fetch_frames_and_splits
-from analyzer.store.db import upsert_rows
+from analyzer.store.db import get_state, set_state, upsert_rows
 from analyzer.universe.members import MAX_BAR_AGE_DAYS
 
 LISTED_EXCHANGES = {"NYSE", "Nasdaq"}
@@ -20,6 +21,8 @@ _NASDAQ_DERIVATIVE = re.compile(r"[A-Z]{4}[WUR]")          # warrants, units, ri
 _SUFFIX_DERIVATIVE = re.compile(r"-(P[A-Z]?|WS?|WT|U|UN|R|RT)$")  # preferreds, warrants, units
 SCREEN_WINDOW_DAYS = 45  # floor; longer liquidity windows widen it (see screen_window_days)
 CLIPPED_MARGIN = timedelta(days=30)
+VERDICTS_KEY = "young_screen_verdicts"  # sync_state: JSON {ticker: {"verdict", "on"}}
+VERDICT_RECHECK_DAYS = 180  # an "old" ticker is screened again after this long (ticker reuse)
 
 
 def young_candidates(
@@ -104,6 +107,27 @@ def revalidate_young_listings(conn, primary: str, history_start: date = HISTORY_
         conn.executemany("UPDATE young_listings SET first_trade_date = ? WHERE ticker = ?", moved)
 
 
+def _load_verdicts(conn) -> dict[str, tuple[str, date]]:
+    """{ticker: (verdict, date judged)}; unreadable state or entries only cost a re-check."""
+    try:
+        raw = json.loads(get_state(conn, VERDICTS_KEY) or "{}")
+    except ValueError:
+        return {}
+    out: dict[str, tuple[str, date]] = {}
+    for ticker, entry in (raw.items() if isinstance(raw, dict) else ()):
+        try:
+            out[ticker] = (str(entry["verdict"]), date.fromisoformat(entry["on"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+    return out
+
+
+def _save_verdicts(conn, verdicts: dict[str, tuple[str, date]], today: date) -> None:
+    keep = {t: {"verdict": v, "on": d.isoformat()} for t, (v, d) in sorted(verdicts.items())
+            if (today - d).days < VERDICT_RECHECK_DAYS}
+    set_state(conn, VERDICTS_KEY, json.dumps(keep))
+
+
 def screen_young_listings(
     conn,
     primary: PriceProvider,
@@ -118,10 +142,19 @@ def screen_young_listings(
     a young listing while it was young. Tickers whose prices are already stored are not
     downloaded or rewritten; their first stored bar from the primary provider dates the listing,
     and a stored history that a fallback reaches back further in is not used this week.
+    Tickers judged "old" (history reaching back to the start) are not screened again for
+    VERDICT_RECHECK_DAYS, so their full histories are not downloaded every week.
     """
     revalidate_young_listings(conn, primary.name, history_start)
+    verdicts = _load_verdicts(conn)
+    settled_old = {t for t, (v, d) in verdicts.items()
+                   if v == "old" and (today - d).days < VERDICT_RECHECK_DAYS}
     cik_by_ticker = _cik_by_ticker(ticker_map)
-    candidates = [t for t in young_candidates(ticker_map) if t in cik_by_ticker]
+    listed = young_candidates(ticker_map)
+    for t in listed:
+        if t not in cik_by_ticker:
+            verdicts[t] = ("no_cik", today)
+    candidates = [t for t in listed if t in cik_by_ticker and t not in settled_old]
     window_start = today - timedelta(days=screen_window_days(rules))
     recent = primary.fetch(candidates, window_start, today) if candidates else {}
     liquid = sorted(t for t, f in recent.items() if _current_and_liquid(f, rules, today))
@@ -147,12 +180,15 @@ def screen_young_listings(
         else:
             continue
         if first <= history_start + CLIPPED_MARGIN:
+            verdicts[ticker] = ("old", today)
             continue  # may have been clipped by the start date: not young inside the window
         if frame is not None:
             replace_prices(conn, ticker, frame, primary.name)
             if ticker in splits:
                 replace_splits(conn, ticker, splits[ticker])
         rows.append((ticker, cik_by_ticker[ticker], first.isoformat(), today.isoformat()))
+        verdicts[ticker] = ("young", today)
         kept.append(ticker)
     upsert_rows(conn, "young_listings", ["ticker", "cik", "first_trade_date", "screened_on"], rows)
+    _save_verdicts(conn, verdicts, today)
     return kept

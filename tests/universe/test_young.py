@@ -370,3 +370,67 @@ def test_a_correct_young_listing_keeps_its_row(tmp_path):
     screen_young_listings(conn, FakeProvider("yfinance", {}), tm, RULES, TODAY)
     assert _rows(conn)[0] == ("GONE", 11, "2022-01-03")   # no primary rows: left alone
 
+
+# --- final review M4: "old" verdicts spare the weekly full-history downloads ------------------
+
+def _full_calls(provider, ticker):
+    return [c for c in provider.calls if c[1] == date(2009, 1, 1) and ticker in c[0]]
+
+
+def test_an_old_liquid_name_is_downloaded_once_not_every_week(tmp_path):
+    conn = fresh_conn(tmp_path)
+    yf = FakeProvider("yfinance", {"OLDADR": bars(pd.bdate_range("2009-01-02", "2027-06-30"),
+                                                  50.0, volume=1e6)})
+    tm = ticker_map([(9, "x", "OLDADR", "NYSE")])
+    for week in range(3):
+        assert screen_young_listings(conn, yf, tm, RULES, TODAY + timedelta(days=7 * week)) == []
+    assert len(_full_calls(yf, "OLDADR")) == 1
+    assert conn.execute("SELECT COUNT(*) FROM prices").fetchone() == (0,)
+    # after 180 days it is screened (and downloaded) again, e.g. in case the ticker was reused
+    screen_young_listings(conn, yf, tm, RULES, TODAY + timedelta(days=179))
+    assert len(_full_calls(yf, "OLDADR")) == 1
+    screen_young_listings(conn, yf, tm, RULES, TODAY + timedelta(days=180))
+    assert len(_full_calls(yf, "OLDADR")) == 2
+
+
+def test_verdicts_are_recorded_per_ticker_with_their_date(tmp_path):
+    import json
+
+    from analyzer.store.db import get_state
+
+    conn = fresh_conn(tmp_path)
+    tm = ticker_map([(9, "Old", "OLDADR", "NYSE"), (10, "New", "NEWCO", "Nasdaq"),
+                     (float("nan"), "NoCik", "NOCIK", "Nasdaq"), (11, "Thin", "THIN", "Nasdaq")])
+    data = {"OLDADR": bars(pd.bdate_range("2009-01-02", "2026-10-09"), 50.0, volume=1e6),
+            "NEWCO": bars(pd.bdate_range("2023-03-01", "2026-10-09"), 50.0, volume=1e6),
+            "THIN": bars(days(60), 5.0, volume=100.0)}
+    screen_young_listings(conn, FakeProvider("yfinance", data), tm, RULES, TODAY)
+    assert json.loads(get_state(conn, "young_screen_verdicts")) == {
+        "NEWCO": {"verdict": "young", "on": "2026-10-09"},
+        "NOCIK": {"verdict": "no_cik", "on": "2026-10-09"},
+        "OLDADR": {"verdict": "old", "on": "2026-10-09"},
+    }
+
+
+def test_a_young_verdict_does_not_stop_the_weekly_screen(tmp_path):
+    conn = fresh_conn(tmp_path)
+    tm = ticker_map([(10, "New", "NEWCO", "Nasdaq")])
+    data = {"NEWCO": bars(pd.bdate_range("2023-03-01", "2026-10-09"), 50.0, volume=1e6)}
+    provider = FakeProvider("yfinance", data)
+    screen_young_listings(conn, provider, tm, RULES, TODAY)
+    assert screen_young_listings(conn, provider, tm, RULES, TODAY + timedelta(days=7)) == ["NEWCO"]
+
+
+def test_unreadable_verdicts_only_cost_a_recheck(tmp_path):
+    from analyzer.store.db import set_state
+
+    conn = fresh_conn(tmp_path)
+    yf = FakeProvider("yfinance", {"OLDADR": bars(pd.bdate_range("2009-01-02", "2026-10-09"),
+                                                  50.0, volume=1e6)})
+    tm = ticker_map([(9, "x", "OLDADR", "NYSE")])
+    for bad in ("not json", "[1, 2]", '{"OLDADR": "old"}', '{"OLDADR": {"verdict": "old"}}'):
+        set_state(conn, "young_screen_verdicts", bad)
+        screen_young_listings(conn, yf, tm, RULES, TODAY)
+    assert len(_full_calls(yf, "OLDADR")) == 4
+    screen_young_listings(conn, yf, tm, RULES, TODAY)
+    assert len(_full_calls(yf, "OLDADR")) == 4
