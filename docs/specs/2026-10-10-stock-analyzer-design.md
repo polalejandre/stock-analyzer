@@ -57,7 +57,7 @@ The whole universe is then filtered to **20-day average dollar volume ≥ $25M**
 | Fundamentals | SEC EDGAR XBRL companyfacts API | History back to about 2008, with `filed` dates for point-in-time use. Requires a `User-Agent` with a contact email. |
 | Fundamentals fallback | XBRL instance document of the latest 10-Q / 10-K | Used when companyfacts lags behind the latest filing. |
 | Daily prices | yfinance | Primary. |
-| Daily prices fallback | To be chosen by the phase 1 probe | Candidates: Tiingo free tier, Nasdaq public endpoint. |
+| Daily prices fallback | Nasdaq public endpoint (`api.nasdaq.com/api/quote/{SYMBOL}/historical`) | Chosen by the 2026-10-10 probe: no key, stocks and ETFs, split-adjusted OHLCV, about 10 years. Class shares use a dot (`BRK.B`). |
 | Earnings releases, guidance | EDGAR 8-K, Item 2.02 | The company's own press release. |
 | Insider buying | EDGAR Form 4, transaction code `P` | Open-market purchases. |
 | Industry classification | EDGAR submissions API (SIC code) | SIC maps to an industry ETF. |
@@ -478,6 +478,6 @@ Each phase gets its own implementation plan.
 
 ## 14. Open questions (settled during implementation)
 
-- Which price fallback to use: settled by the phase 1 probe.
+- Price fallback: Nasdaq public endpoint (decided 2026-10-10).
 - Final thresholds: tuned by the research harness on in-sample data.
 - How much weight insider buying and guidance tone deserve inside the quality score: checked in research breakdowns; weights stay fixed unless a rule-version change is made deliberately.
