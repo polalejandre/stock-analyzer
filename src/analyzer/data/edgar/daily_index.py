@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -12,6 +13,9 @@ from analyzer.store.db import get_state, set_state
 MASTER_URL = "https://www.sec.gov/Archives/edgar/daily-index/{y}/QTR{q}/master.{ymd}.idx"
 POINTER_KEY = "edgar_daily_index_done"
 HOLIDAY_AFTER_DAYS = 3
+HEADER = "CIK|Company Name|Form Type|Date Filed|Filename"
+
+log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -40,18 +44,32 @@ def parse_master_index(text: str) -> list[IndexEntry]:
     out = []
     for line in lines[start:]:
         parts = line.split("|")
-        if len(parts) != 5 or not parts[0].strip().isdigit():
+        if len(parts) < 5 or not parts[0].strip().isdigit():
             continue
-        cik, company, form, filed, filename = parts
+        cik = parts[0]
+        form, filed, filename = parts[-3:]
+        company = "|".join(parts[1:-3])
+        try:
+            date_filed = _parse_date(filed)
+        except ValueError:
+            log.warning("skipping index row with bad date: %r", line)
+            continue
         accession = filename.strip().rsplit("/", 1)[-1].removesuffix(".txt")
-        out.append(IndexEntry(int(cik), company.strip(), form.strip(), _parse_date(filed), accession))
+        out.append(IndexEntry(int(cik), company.strip(), form.strip(), date_filed, accession))
     return out
+
+
+def _require_header(body: bytes | str) -> None:
+    text = body.decode("utf-8", "replace") if isinstance(body, bytes) else body
+    if HEADER not in text:
+        raise ValueError("not a master index")
 
 
 def fetch_master_index(sec: HttpClient, d: date) -> list[IndexEntry] | None:
     url = MASTER_URL.format(y=d.year, q=(d.month - 1) // 3 + 1, ymd=d.strftime("%Y%m%d"))
     try:
-        text = sec.get_text(url, cache_key=f"sec/daily-index/{d:%Y%m%d}.idx")
+        text = sec.get_text(url, cache_key=f"sec/daily-index/{d:%Y%m%d}.idx",
+                           validate=_require_header)
     except NotFound:
         return None
     return parse_master_index(text)

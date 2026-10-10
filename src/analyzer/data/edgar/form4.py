@@ -2,16 +2,18 @@
 
 from __future__ import annotations
 
+import logging
 import re
 import xml.etree.ElementTree as ET
 from datetime import date
 
-from analyzer.data.http import HttpClient, NotFound
+from analyzer.data.http import FetchError, HttpClient, NotFound
 from analyzer.store.db import upsert_rows
 
 INSIDER_COLUMNS = ["accession", "seq", "issuer_cik", "filing_date", "owner_names", "relationship",
                    "officer_title", "trans_date", "trans_code", "shares", "price",
                    "acquired_disposed", "source"]
+log = logging.getLogger(__name__)
 _FLAGS = (("isDirector", "Director"), ("isOfficer", "Officer"),
           ("isTenPercentOwner", "TenPercentOwner"), ("isOther", "Other"))
 
@@ -80,10 +82,14 @@ def sync_form4_filings(conn, sec: HttpClient, ciks: set[int], since: date) -> in
             continue
         try:
             xml = sec.get_bytes(form4_document_url(cik, accession, document),
-                                cache_key=f"sec/form4/{accession}.xml")
+                                cache_key=f"sec/form4/{accession}.xml",
+                                validate=ET.fromstring)
+            rows = parse_form4(xml, accession, filing_date)
         except NotFound:
             continue
-        upsert_rows(conn, "insider_transactions", INSIDER_COLUMNS,
-                    parse_form4(xml, accession, filing_date))
+        except (FetchError, ET.ParseError, AttributeError, ValueError) as exc:
+            log.warning("skipping Form 4 %s: %s", accession, exc)
+            continue
+        upsert_rows(conn, "insider_transactions", INSIDER_COLUMNS, rows)
         parsed += 1
     return parsed

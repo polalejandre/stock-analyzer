@@ -47,6 +47,8 @@ def test_parse_form4():
     rows = parse_form4(FORM4, "0000320193-26-000001", "2026-09-17")
     assert len(rows) == 2
     acc, seq, issuer, filed, owners, rel, title, tdate, code, shares, price, ad, src = rows[0]
+    assert (acc, seq, filed) == ("0000320193-26-000001", 0, "2026-09-17")
+    assert rows[1][1] == 1
     assert (issuer, owners, rel, title) == (320193, "Doe Jane; Roe Rick", "Director,Officer",
                                              "President and CEO")
     assert (tdate, code, shares, price, ad, src) == ("2026-09-15", "P", 10000.0, 61.5, "A", "xml")
@@ -66,3 +68,20 @@ def test_sync_form4_filings_parses_new_filings_once(tmp_path):
     assert sync_form4_filings(conn, client, {320193}, since=date(2026, 6, 30)) == 0
     assert len(session.calls) == 1
     assert conn.execute("SELECT COUNT(*) FROM insider_transactions").fetchone()[0] == 2
+
+
+def test_bad_document_does_not_block_other_filings(tmp_path):
+    conn = connect(tmp_path / "t.db")
+    migrate(conn)
+    conn.executemany("INSERT INTO filings VALUES (?, ?, ?, ?, NULL, NULL, ?)", [
+        ("0000320193-26-000001", 320193, "4", "2026-09-17", "bad.xml"),
+        ("0000320193-26-000002", 320193, "4", "2026-09-18", "good.xml"),
+    ])
+
+    def handler(url, params):
+        return FakeResponse(content=b"<html>oops" if "bad.xml" in url else FORM4)
+
+    client, _ = fake_client(tmp_path, handler=handler)
+    assert sync_form4_filings(conn, client, {320193}, since=date(2026, 6, 30)) == 1
+    accs = {r[0] for r in conn.execute("SELECT accession FROM insider_transactions")}
+    assert accs == {"0000320193-26-000002"}

@@ -8,6 +8,7 @@ from analyzer.data.edgar.daily_index import (
     parse_master_index,
     scan_daily_indexes,
 )
+from analyzer.data.http import FetchError
 from analyzer.store.db import connect, get_state, migrate, set_state
 from tests.helpers import FakeResponse, fake_client
 
@@ -76,3 +77,22 @@ def test_scan_collects_forms_for_tracked_ciks(conn, tmp_path):
     changed = scan_daily_indexes(conn, client, {320193, 1065280}, date(2026, 10, 10))
     assert changed == {320193: {"10-Q"}, 1065280: {"4"}}
     assert get_state(conn, POINTER_KEY) == "2026-10-08"
+
+
+def test_parse_company_name_with_pipe():
+    text = MASTER + "55|A|B CORP|10-K|20261006|edgar/data/55/0000000055-26-000001.txt\n"
+    e = parse_master_index(text)[-1]
+    assert (e.cik, e.company, e.form, e.accession) == (55, "A|B CORP", "10-K", "0000000055-26-000001")
+
+
+def test_parse_skips_row_with_bad_date():
+    text = MASTER + "55|X|10-K|notadate|edgar/data/55/0000000055-26-000001.txt\n"
+    assert len(parse_master_index(text)) == 3
+
+
+def test_bad_index_body_raises_and_pointer_stays(conn, tmp_path):
+    set_state(conn, POINTER_KEY, "2026-10-05")
+    client, _ = fake_client(tmp_path, handler=lambda url, params: FakeResponse(content="<html>oops</html>"))
+    with pytest.raises(FetchError):
+        scan_daily_indexes(conn, client, {320193}, date(2026, 10, 10))
+    assert get_state(conn, POINTER_KEY) == "2026-10-05"
