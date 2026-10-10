@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 import io
 import json
 import logging
@@ -13,13 +14,15 @@ import pandas as pd
 
 from analyzer.data.edgar.form4 import INSIDER_COLUMNS, sync_form4_filings
 from analyzer.data.http import HttpClient, NotFound
-from analyzer.store.db import get_state, set_state
+from analyzer.store.db import get_state
 
 BULK_URL = ("https://www.sec.gov/files/structureddata/data/insider-transactions-data-sets/"
             "{label}_form345.zip")
 STATE_QUARTERS = "insider_bulk_quarters"
 STATE_CIKS = "insider_bulk_ciks"
 REQUIRED_FILES = ("SUBMISSION.TSV", "REPORTINGOWNER.TSV", "NONDERIV_TRANS.TSV")
+MAX_SKIPPED_SHARE = 0.05  # more unreadable filings than this means the file format is not what we expect
+LATE_QUARTER_DAYS = 180   # a quarter missing this long after it ended is probably a wrong URL
 log = logging.getLogger(__name__)
 
 
@@ -62,23 +65,44 @@ def _fetch_zip(sec: HttpClient, label: str) -> bytes:
 
 def _read(z: zipfile.ZipFile, name: str) -> pd.DataFrame:
     return pd.read_csv(z.open(_member(z, name)), sep="\t", dtype=str, keep_default_na=False,
-                       quoting=3)
+                       quoting=csv.QUOTE_NONE)
+
+
+def _tolerate_unreadable(bad: pd.Series, total: int, column: str) -> None:
+    """Let a tiny minority of unreadable values be skipped; a larger share means the format changed.
+
+    Skipping everything would load a quarter with zero rows and mark it done forever.
+    """
+    if bad.empty:
+        return
+    if len(bad) / total > MAX_SKIPPED_SHARE:
+        raise ValueError(f"{len(bad)} of {total} Form 4 filings have an unreadable {column} "
+                         f"(first bad value: {bad.iloc[0]!r})")
+    log.warning("skipping %d of %d Form 4 filings with an unreadable %s (first: %r)",
+                len(bad), total, column, bad.iloc[0])
 
 
 def parse_insider_zip(data: bytes, issuer_ciks: set[int]) -> list[tuple]:
+    """Rows for the Form 4 / 4/A filings of `issuer_ciks`.
+
+    Raises ValueError when more than 5% of the relevant filings have an unreadable ISSUERCIK or
+    FILING_DATE (the columns are unprobed; a format change must not look like an empty quarter).
+    """
     with zipfile.ZipFile(io.BytesIO(data)) as z:
         sub = _read(z, "SUBMISSION.TSV")
         owners = _read(z, "REPORTINGOWNER.TSV")
         trans = _read(z, "NONDERIV_TRANS.TSV")
-    sub = sub[sub["DOCUMENT_TYPE"].isin(["4", "4/A"])].copy()
-    sub["ISSUERCIK"] = pd.to_numeric(sub["ISSUERCIK"], errors="coerce")
+    sub = sub.drop_duplicates("ACCESSION_NUMBER")  # a repeated row would double its transactions
+    sub = sub[sub["DOCUMENT_TYPE"].isin(["4", "4/A"])]
+    cik = pd.to_numeric(sub["ISSUERCIK"], errors="coerce")
+    _tolerate_unreadable(sub.loc[cik.isna(), "ISSUERCIK"], len(sub), "ISSUERCIK")
+    sub = sub.assign(ISSUERCIK=cik)
     sub = sub[sub["ISSUERCIK"].isin(issuer_ciks)].copy()
     sub["ISSUERCIK"] = sub["ISSUERCIK"].astype("int64")
-    sub["FILING_DATE"] = sub["FILING_DATE"].map(_iso)
-    undated = sub["FILING_DATE"].isna()  # filing_date is NOT NULL in the table
-    if undated.any():
-        log.warning("skipping %d insider filings with an unreadable filing date", undated.sum())
-        sub = sub[~undated]
+    filed = sub["FILING_DATE"].map(_iso)
+    undated = filed.isna()  # filing_date is NOT NULL in the table
+    _tolerate_unreadable(sub.loc[undated, "FILING_DATE"], len(sub), "FILING_DATE")
+    sub = sub.assign(FILING_DATE=filed)[~undated]
     if sub.empty:
         return []
     owners = owners[owners["ACCESSION_NUMBER"].isin(sub["ACCESSION_NUMBER"])]
@@ -136,13 +160,33 @@ class InsiderSync:
     xml_filings: int = 0
 
 
+def _save_state(conn, loaded: set[str], covered: set[int]) -> None:
+    """Write both bookkeeping keys in ONE transaction.
+
+    Two separate commits could crash in between and leave a quarter marked loaded while `covered`
+    still lists a CIK that quarter was read without; that CIK would never be backfilled.
+    """
+    with conn:
+        conn.executemany(
+            "INSERT OR REPLACE INTO sync_state (key, value) VALUES (?, ?)",
+            [(STATE_QUARTERS, json.dumps(sorted(loaded))), (STATE_CIKS, json.dumps(sorted(covered)))])
+
+
+def _parse(data: bytes, label: str, ciks: set[int]) -> list[tuple]:
+    try:
+        return parse_insider_zip(data, ciks)
+    except ValueError as exc:
+        raise ValueError(f"insider quarter {label}: {exc}") from exc
+
+
 def sync_insider(conn, sec: HttpClient, ciks: set[int], today: date) -> InsiderSync:
     """Load every published quarter, then fill the unpublished tail from Form 4 XML.
 
-    Bookkeeping, saved after each step so a failure part-way loses nothing:
-    `loaded` is the set of quarters in the table; `covered` is the set of CIKs that have been
-    read from every one of those quarters. Inserts are delete-then-insert per accession, so
-    re-reading a quarter is harmless.
+    Bookkeeping: `loaded` is the set of quarters in the table; `covered` is the set of CIKs that
+    have been read from EVERY one of those quarters. Both are saved together after each quarter,
+    so a failure part-way loses nothing. Inserts are delete-then-insert per accession, so
+    re-reading a quarter is harmless. A quarter that fails to fetch or parse is not marked loaded
+    and its error propagates.
     """
     result = InsiderSync()
     loaded = set(json.loads(get_state(conn, STATE_QUARTERS) or "[]"))
@@ -150,14 +194,23 @@ def sync_insider(conn, sec: HttpClient, ciks: set[int], today: date) -> InsiderS
 
     new_ciks = ciks - covered
     if new_ciks:  # re-read cached quarters for companies added since
+        complete = True
         for label in sorted(loaded):
-            rows = parse_insider_zip(_fetch_zip(sec, label), new_ciks)
+            try:
+                data = _fetch_zip(sec, label)
+            except NotFound:
+                log.warning("insider quarter %s is no longer cached or downloadable; "
+                            "%d new CIKs will be backfilled on a later run", label, len(new_ciks))
+                complete = False
+                continue
+            rows = _parse(data, label, new_ciks)
             if rows:
                 _insert(conn, rows)
-        if loaded:
-            result.backfilled_ciks = len(new_ciks)
-        covered |= new_ciks
-        set_state(conn, STATE_CIKS, json.dumps(sorted(covered)))
+        if complete:
+            covered |= new_ciks
+            if loaded:  # with nothing loaded yet the first quarter below records the CIKs
+                result.backfilled_ciks = len(new_ciks)
+                _save_state(conn, loaded, covered)
 
     for label in quarters_to_load(today):
         if label in loaded:
@@ -165,14 +218,16 @@ def sync_insider(conn, sec: HttpClient, ciks: set[int], today: date) -> InsiderS
         try:
             data = _fetch_zip(sec, label)
         except NotFound:
+            if (today - quarter_end(label)).days > LATE_QUARTER_DAYS:
+                log.warning("insider quarter %s ended %d days ago but is not published; "
+                            "is the URL still right?", label, (today - quarter_end(label)).days)
             break  # not published yet; later quarters aren't either
-        rows = parse_insider_zip(data, ciks)
+        rows = _parse(data, label, ciks)
         if rows:
             _insert(conn, rows)
         loaded.add(label)
         covered &= ciks  # this quarter was read for `ciks` only; others are no longer covered
-        set_state(conn, STATE_QUARTERS, json.dumps(sorted(loaded)))
-        set_state(conn, STATE_CIKS, json.dumps(sorted(covered)))
+        _save_state(conn, loaded, covered)
         result.loaded.append(label)
 
     since = quarter_end(max(loaded)) if loaded else today - timedelta(days=120)

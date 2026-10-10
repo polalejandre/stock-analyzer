@@ -11,6 +11,11 @@ from analyzer.data.http import HttpClient
 
 def refresh_company(conn, sec: HttpClient, cik: int, *, max_age: timedelta | None,
                     facts: bool = True, now: datetime | None = None) -> None:
+    """Store the company's submissions and (if `facts`) its companyfacts.
+
+    `max_age` is how old a cached SEC response may be before it is refetched: `timedelta(0)`
+    always refetches; `None` reuses any cached copy forever.
+    """
     now = now or datetime.now(UTC)
     store_submissions(conn, fetch_submissions(sec, cik, max_age=max_age), now)
     if facts:

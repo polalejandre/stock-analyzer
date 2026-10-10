@@ -1,5 +1,7 @@
 import io
 import json
+import logging
+import sqlite3
 import zipfile
 from datetime import date
 
@@ -134,15 +136,59 @@ def state(conn, key):
     return json.loads(get_state(conn, key))
 
 
-def test_parse_skips_unreadable_filing_dates_and_issuers():
-    data = zip_of(
-        [("A-1", "not a date", "4", "320193"), ("A-2", "05-JAN-2024", "4", ""),
-         ("A-3", "05-JAN-2024", "4/A", "320193")],
-        trans=[("A-1", "03-JAN-2024", "P", "1", "1", "A"), ("A-2", "03-JAN-2024", "P", "1", "1", "A"),
-               ("A-3", "03-JAN-2024", "P", "5", "2", "A")])
+def filings_zip(n, *, bad_dates=(), bad_ciks=(), date_text="05-JAN-2024"):
+    """n Form 4 filings (A-000...) for issuer 320193, one transaction each."""
+    sub = [(f"A-{i:03d}", "garbage" if i in bad_dates else date_text, "4",
+            "" if i in bad_ciks else "320193") for i in range(n)]
+    trans = [(f"A-{i:03d}", "03-JAN-2024", "P", "1", "1", "A") for i in range(n)]
+    return zip_of(sub, trans=trans)
+
+
+def test_parse_filing_without_owner_rows_has_none_owner_fields():
+    data = zip_of([("A-3", "05-JAN-2024", "4/A", "320193")],
+                  trans=[("A-3", "03-JAN-2024", "P", "5", "2", "A")])
     rows = parse_insider_zip(data, {320193})
     assert [(r[0], r[3]) for r in rows] == [("A-3", "2024-01-05")]
-    assert rows[0][4:7] == (None, None, None)  # no reporting-owner row
+    assert rows[0][4:7] == (None, None, None)
+
+
+def test_parse_skips_a_tiny_minority_of_unreadable_values(caplog):
+    with caplog.at_level(logging.WARNING):
+        rows = parse_insider_zip(filings_zip(100, bad_dates={7}, bad_ciks={50}), {320193})
+    assert len(rows) == 98
+    assert {"A-007", "A-050"}.isdisjoint(r[0] for r in rows)
+    assert "FILING_DATE" in caplog.text and "ISSUERCIK" in caplog.text
+
+
+@pytest.mark.parametrize("bad, raises", [(5, False), (6, True)])
+def test_parse_threshold_is_five_percent_of_tracked_filings(bad, raises):
+    data = filings_zip(100, bad_dates=set(range(bad)))
+    if raises:
+        with pytest.raises(ValueError, match="6 of 100.*FILING_DATE.*'garbage'"):
+            parse_insider_zip(data, {320193})
+    else:
+        assert len(parse_insider_zip(data, {320193})) == 95
+
+
+def test_parse_raises_when_every_date_or_issuer_is_unreadable():
+    with pytest.raises(ValueError, match="FILING_DATE.*'2024/01/05'"):
+        parse_insider_zip(filings_zip(100, date_text="2024/01/05"), {320193})
+    with pytest.raises(ValueError, match="100 of 100.*ISSUERCIK"):
+        parse_insider_zip(filings_zip(100, bad_ciks=set(range(100))), {320193})
+
+
+def test_parse_ignores_untracked_filings_when_counting_bad_dates():
+    sub = [("A-1", "05-JAN-2024", "4", "320193")] + [(f"B-{i}", "garbage", "4", "999")
+                                                    for i in range(50)]
+    data = zip_of(sub, trans=[("A-1", "03-JAN-2024", "P", "1", "1", "A")])
+    assert len(parse_insider_zip(data, {320193})) == 1
+
+
+def test_parse_duplicate_submission_rows_do_not_double_transactions():
+    data = zip_of([("A-1", "05-JAN-2024", "4", "320193")] * 2,
+                  trans=[("A-1", "03-JAN-2024", "P", "1", "1", "A")])
+    rows = parse_insider_zip(data, {320193})
+    assert [(r[0], r[1]) for r in rows] == [("A-1", 0)]
 
 
 def test_parse_with_no_transactions_for_tracked_filings():
@@ -238,8 +284,80 @@ def test_form4_xml_covers_filings_after_the_last_loaded_quarter(conn, tmp_path):
             return FakeResponse(content=form4)
         return FakeResponse(404)
 
-    client, _ = fake_client(tmp_path, handler=handler)
+    client, session = fake_client(tmp_path, handler=handler)
     result = sync_insider(conn, client, {320193}, date(2013, 10, 10))
     assert result.xml_filings == 1
     assert conn.execute("SELECT source FROM insider_transactions "
                         "WHERE accession = '0000320193-13-000060'").fetchall() == [("xml",)]
+    assert [c for c in session.calls if c["url"].endswith("old.xml")] == []
+    assert conn.execute("SELECT COUNT(*) FROM insider_transactions "
+                        "WHERE accession = '0000320193-13-000050'").fetchone()[0] == 0
+
+
+def test_quarter_with_unreadable_dates_is_not_marked_loaded(conn, tmp_path):
+    zips = {"2013q1": filings_zip(100, date_text="2024/01/05")}
+    client, _ = fake_client(tmp_path, handler=serve(zips))
+    with pytest.raises(ValueError, match="2013q1.*FILING_DATE"):
+        sync_insider(conn, client, {320193}, date(2013, 10, 10))
+    assert get_state(conn, STATE_QUARTERS) is None
+    assert conn.execute("SELECT COUNT(*) FROM insider_transactions").fetchone()[0] == 0
+
+
+def test_one_unreadable_date_in_a_quarter_is_skipped_and_the_quarter_loads(conn, tmp_path):
+    client, _ = fake_client(tmp_path, handler=serve({"2013q1": filings_zip(100, bad_dates={3})}))
+    result = sync_insider(conn, client, {320193}, date(2013, 10, 10))
+    assert result.loaded == ["2013q1"]
+    assert conn.execute("SELECT COUNT(*) FROM insider_transactions").fetchone()[0] == 99
+
+
+def test_state_keys_are_written_in_one_transaction(conn, tmp_path):
+    zips = {"2013q1": make_zip()}
+    client, _ = fake_client(tmp_path, handler=serve(zips))
+    sync_insider(conn, client, {320193}, date(2013, 10, 10))
+    # the second key's write fails, as if the process died between the two upserts
+    conn.execute(
+        f"CREATE TRIGGER fail_ciks BEFORE INSERT ON sync_state WHEN NEW.key = '{STATE_CIKS}' "
+        "BEGIN SELECT RAISE(ABORT, 'boom'); END")
+    zips["2013q2"] = make_zip(accession="0000320193-24-000011")
+    with pytest.raises(sqlite3.IntegrityError, match="boom"):
+        sync_insider(conn, client, {320193}, date(2013, 10, 10))
+    assert state(conn, STATE_QUARTERS) == ["2013q1"]
+    assert state(conn, STATE_CIKS) == [320193]
+    # the rows landed, so the next run re-reads the quarter harmlessly
+    conn.execute("DROP TRIGGER fail_ciks")
+    assert sync_insider(conn, client, {320193}, date(2013, 10, 10)).loaded == ["2013q2"]
+    assert conn.execute("SELECT COUNT(*) FROM insider_transactions").fetchone()[0] == 4
+    assert state(conn, STATE_QUARTERS) == ["2013q1", "2013q2"]
+
+
+def test_missing_old_quarter_warns_but_a_recent_gap_does_not(conn, tmp_path, caplog):
+    client, _ = fake_client(tmp_path, handler=serve({}))
+    with caplog.at_level(logging.WARNING):
+        sync_insider(conn, client, {320193}, date(2013, 10, 10))  # 2013q1 ended 193 days ago
+    assert "2013q1" in caplog.text and "not published" in caplog.text
+    caplog.clear()
+    client, _ = fake_client(tmp_path, handler=serve({"2013q1": make_zip()}))
+    with caplog.at_level(logging.WARNING):
+        sync_insider(conn, client, {320193}, date(2013, 7, 20))  # q2 ended 20 days ago
+    assert caplog.text == ""
+
+
+def test_backfill_skips_an_evicted_quarter_and_retries_the_ciks_later(conn, tmp_path, caplog):
+    zips = {"2013q1": make_zip()}
+    client, session = fake_client(tmp_path, handler=serve(zips))
+    sync_insider(conn, client, {1}, date(2013, 10, 10))
+    client.cache_path("sec/insider/2013q1.zip").unlink()
+    gone = zips.pop("2013q1")  # evicted from disk and no longer served
+    with caplog.at_level(logging.WARNING):
+        result = sync_insider(conn, client, {1, 320193}, date(2013, 10, 10))
+    assert "2013q1" in caplog.text
+    assert result.backfilled_ciks == 0
+    assert state(conn, STATE_CIKS) == [1]  # 320193 is not covered, so it retries
+    assert conn.execute(
+        "SELECT COUNT(*) FROM insider_transactions WHERE issuer_cik = 320193").fetchone()[0] == 0
+    zips["2013q1"] = gone
+    result = sync_insider(conn, client, {1, 320193}, date(2013, 10, 10))
+    assert result.backfilled_ciks == 1
+    assert state(conn, STATE_CIKS) == [1, 320193]
+    assert conn.execute(
+        "SELECT COUNT(*) FROM insider_transactions WHERE issuer_cik = 320193").fetchone()[0] == 2

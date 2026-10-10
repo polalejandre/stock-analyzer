@@ -36,3 +36,18 @@ def test_refresh_company_without_facts(tmp_path):
     migrate(conn)
     refresh_company(conn, client, 320193, max_age=None, facts=False)
     assert len(session.calls) == 1
+
+
+def test_max_age_none_reuses_the_cache_and_zero_always_refetches(tmp_path):
+    def handler(url, params):
+        return FakeResponse(json_data=SUBS if url == SUBMISSIONS_URL.format(cik=320193) else CF)
+
+    client, session = fake_client(tmp_path, handler=handler)
+    conn = connect(tmp_path / "t.db")
+    migrate(conn)
+    refresh_company(conn, client, 320193, max_age=timedelta(0))  # fills the cache: 2 requests
+    assert len(session.calls) == 2
+    refresh_company(conn, client, 320193, max_age=None)
+    assert len(session.calls) == 2  # any cached copy is reused
+    refresh_company(conn, client, 320193, max_age=timedelta(0))
+    assert len(session.calls) == 4  # always refetched
