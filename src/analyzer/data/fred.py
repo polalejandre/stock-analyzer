@@ -41,7 +41,8 @@ def sync_macro(conn, client: HttpClient, api_key: str | None, today: date) -> Ma
         try:
             rows = fetch_series(client, api_key, series_id, start)
         except Exception as exc:  # FetchError messages never include the query string
-            result.failed.append((series_id, f"{type(exc).__name__}: {exc}"))
+            result.failed.append(
+                (series_id, f"{type(exc).__name__}: {exc}".replace(api_key, "***")))
             continue
         upsert_rows(conn, "macro", ["series_id", "date", "value"], rows)
         latest = conn.execute("SELECT MAX(date) FROM macro WHERE series_id = ?",

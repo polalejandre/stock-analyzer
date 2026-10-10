@@ -1,6 +1,8 @@
+import logging
 from datetime import date
 
 import pytest
+import requests
 
 from analyzer.config import ConfigError
 from analyzer.data.fred import MACRO_SERIES, sync_macro
@@ -45,10 +47,36 @@ def test_missing_key_is_a_config_error(conn, tmp_path):
         sync_macro(conn, client, None, date(2026, 10, 10))
 
 
-def test_fred_key_is_never_cached(conn, tmp_path):
+def _files_under(path):
+    return [] if not path.exists() else [p for p in path.rglob("*") if p.is_file()]
+
+
+def test_fred_key_is_never_cached_on_success(conn, tmp_path, caplog):
+    caplog.set_level(logging.DEBUG)
+    client, _ = fake_client(tmp_path, handler=lambda url, p: FakeResponse(
+        json_data=obs(("2026-10-02", "-0.5"))))
+    result = sync_macro(conn, client, "SECRETKEY", date(2026, 10, 10))
+    assert result.failed == []
+    assert _files_under(tmp_path / "cache") == []
+    assert "SECRETKEY" not in caplog.text
+
+
+def test_fred_key_absent_from_errors_on_http_failure(conn, tmp_path, caplog):
+    caplog.set_level(logging.DEBUG)
     client, _ = fake_client(tmp_path, handler=lambda url, p: FakeResponse(400))
     result = sync_macro(conn, client, "SECRETKEY", date(2026, 10, 10))
     assert len(result.failed) == len(MACRO_SERIES)
     assert all("SECRETKEY" not in err for _, err in result.failed)
-    cache = tmp_path / "cache"
-    assert not cache.exists() or not any("SECRETKEY" in str(p) for p in cache.rglob("*"))
+    assert _files_under(tmp_path / "cache") == []
+    assert "SECRETKEY" not in caplog.text
+
+
+def test_fred_key_absent_from_errors_on_exception(conn, tmp_path, caplog):
+    caplog.set_level(logging.DEBUG)
+    boom = requests.ConnectionError("boom ?api_key=SECRETKEY")
+    client, _ = fake_client(tmp_path, handler=lambda url, p: boom)
+    result = sync_macro(conn, client, "SECRETKEY", date(2026, 10, 10))
+    assert {sid for sid, _ in result.failed} == set(MACRO_SERIES)
+    assert all("SECRETKEY" not in err for _, err in result.failed)
+    assert _files_under(tmp_path / "cache") == []
+    assert "SECRETKEY" not in caplog.text
