@@ -22,6 +22,7 @@ STATE_QUARTERS = "insider_bulk_quarters"
 STATE_CIKS = "insider_bulk_ciks"
 REQUIRED_FILES = ("SUBMISSION.TSV", "REPORTINGOWNER.TSV", "NONDERIV_TRANS.TSV")
 MAX_SKIPPED_SHARE = 0.05  # more unreadable filings than this means the file format is not what we expect
+MIN_SKIPPED_TO_RAISE = 3  # ...but only once that many are skipped; a lone bad row is just skipped
 LATE_QUARTER_DAYS = 180   # a quarter missing this long after it ended is probably a wrong URL
 log = logging.getLogger(__name__)
 
@@ -69,13 +70,16 @@ def _read(z: zipfile.ZipFile, name: str) -> pd.DataFrame:
 
 
 def _tolerate_unreadable(bad: pd.Series, total: int, column: str) -> None:
-    """Let a tiny minority of unreadable values be skipped; a larger share means the format changed.
+    """Let a few unreadable values be skipped; many of them means the format changed.
 
-    Skipping everything would load a quarter with zero rows and mark it done forever.
+    Raises only when at least MIN_SKIPPED_TO_RAISE are bad AND they exceed MAX_SKIPPED_SHARE of
+    `total`. A real format mismatch hits every filing, whereas one bad row among a handful (a lone
+    new CIK) must not block the quarter. Skipping everything would load a quarter with zero rows
+    and mark it done forever.
     """
     if bad.empty:
         return
-    if len(bad) / total > MAX_SKIPPED_SHARE:
+    if len(bad) >= MIN_SKIPPED_TO_RAISE and len(bad) / total > MAX_SKIPPED_SHARE:
         raise ValueError(f"{len(bad)} of {total} Form 4 filings have an unreadable {column} "
                          f"(first bad value: {bad.iloc[0]!r})")
     log.warning("skipping %d of %d Form 4 filings with an unreadable %s (first: %r)",
@@ -85,8 +89,9 @@ def _tolerate_unreadable(bad: pd.Series, total: int, column: str) -> None:
 def parse_insider_zip(data: bytes, issuer_ciks: set[int]) -> list[tuple]:
     """Rows for the Form 4 / 4/A filings of `issuer_ciks`.
 
-    Raises ValueError when more than 5% of the relevant filings have an unreadable ISSUERCIK or
-    FILING_DATE (the columns are unprobed; a format change must not look like an empty quarter).
+    Raises ValueError when at least 3 and more than 5% of the relevant filings have an unreadable
+    ISSUERCIK or FILING_DATE (the columns are unprobed; a format change must not look like an
+    empty quarter).
     """
     with zipfile.ZipFile(io.BytesIO(data)) as z:
         sub = _read(z, "SUBMISSION.TSV")

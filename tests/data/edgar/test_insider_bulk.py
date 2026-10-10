@@ -170,6 +170,21 @@ def test_parse_threshold_is_five_percent_of_tracked_filings(bad, raises):
         assert len(parse_insider_zip(data, {320193})) == 95
 
 
+def test_parse_skips_a_lone_bad_row_among_a_few_filings(caplog):
+    with caplog.at_level(logging.WARNING):
+        rows = parse_insider_zip(filings_zip(2, bad_dates={0}), {320193})
+    assert [r[0] for r in rows] == ["A-001"]  # 50% bad, but only one
+    assert "FILING_DATE" in caplog.text
+    assert len(parse_insider_zip(filings_zip(10, bad_dates={0, 1}), {320193})) == 8  # 20%, only two
+
+
+def test_parse_raises_at_three_bad_filings_when_they_exceed_five_percent():
+    with pytest.raises(ValueError, match="3 of 10.*FILING_DATE"):
+        parse_insider_zip(filings_zip(10, bad_dates={0, 1, 2}), {320193})
+    with pytest.raises(ValueError, match="3 of 10.*ISSUERCIK"):
+        parse_insider_zip(filings_zip(10, bad_ciks={0, 1, 2}), {320193})
+
+
 def test_parse_raises_when_every_date_or_issuer_is_unreadable():
     with pytest.raises(ValueError, match="FILING_DATE.*'2024/01/05'"):
         parse_insider_zip(filings_zip(100, date_text="2024/01/05"), {320193})
@@ -361,3 +376,18 @@ def test_backfill_skips_an_evicted_quarter_and_retries_the_ciks_later(conn, tmp_
     assert state(conn, STATE_CIKS) == [1, 320193]
     assert conn.execute(
         "SELECT COUNT(*) FROM insider_transactions WHERE issuer_cik = 320193").fetchone()[0] == 2
+
+
+def test_backfill_of_a_lone_new_cik_skips_its_one_bad_row(conn, tmp_path, caplog):
+    sub = [("B-1", "05-JAN-2024", "4", "1"), ("A-1", "05-JAN-2024", "4", "320193"),
+           ("A-2", "garbage", "4", "320193")]
+    trans = [(a, "03-JAN-2024", "P", "1", "1", "A") for a, *_ in sub]
+    client, _ = fake_client(tmp_path, handler=serve({"2013q1": zip_of(sub, trans=trans)}))
+    sync_insider(conn, client, {1}, date(2013, 10, 10))
+    with caplog.at_level(logging.WARNING):
+        result = sync_insider(conn, client, {1, 320193}, date(2013, 10, 10))
+    assert result.backfilled_ciks == 1
+    assert "FILING_DATE" in caplog.text
+    assert state(conn, STATE_CIKS) == [1, 320193]
+    assert conn.execute("SELECT accession FROM insider_transactions WHERE issuer_cik = 320193"
+                        ).fetchall() == [("A-1",)]
