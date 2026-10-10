@@ -650,3 +650,14 @@ def test_chunked_full_download_reports_fallback_and_missing_across_chunks(conn):
     assert rep.missing == []
     assert rep.historical_missing == [symbols[-1]]
     assert len(rep.updated) == len(symbols) - 1
+
+
+def test_prices_and_splits_are_replaced_in_one_transaction(conn):
+    replace_prices(conn, "NVDA", bars(["2026-10-01"], [100]), "yfinance", [(date(2021, 7, 20), 4.0)])
+    assert read_splits(conn, "NVDA") == [(date(2021, 7, 20), 4.0)]
+    replace_prices(conn, "NVDA", bars(["2026-10-02"], [101]), "yfinance")  # no splits given: kept
+    assert read_splits(conn, "NVDA") == [(date(2021, 7, 20), 4.0)]
+    with pytest.raises(ValueError):  # the splits write fails: the price rewrite rolls back too
+        replace_prices(conn, "NVDA", bars(["2026-10-05"], [50]), "yfinance", [(None, 2.0)])
+    assert read_prices(conn, "NVDA")["close"].tolist() == [101.0]
+    assert read_splits(conn, "NVDA") == [(date(2021, 7, 20), 4.0)]

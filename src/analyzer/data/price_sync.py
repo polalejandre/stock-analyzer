@@ -87,7 +87,12 @@ def write_prices(conn, symbol: str, frame: pd.DataFrame, source: str) -> None:
     upsert_rows(conn, "prices", _COLUMNS, _rows(symbol, frame, source))
 
 
-def replace_prices(conn, symbol: str, frame: pd.DataFrame, source: str) -> None:
+def replace_prices(
+    conn, symbol: str, frame: pd.DataFrame, source: str,
+    splits: Sequence[tuple[date, float]] | None = None,
+) -> None:
+    """Replace the symbol's history; with `splits`, its split events too, in the same transaction,
+    so the closes and the splits they are adjusted for never disagree after an interruption."""
     rows = list(_rows(symbol, frame, source))  # build first: a bad frame must not touch the table
     if not rows:
         raise ValueError(f"no usable price rows to replace {symbol} with")
@@ -98,25 +103,26 @@ def replace_prices(conn, symbol: str, frame: pd.DataFrame, source: str) -> None:
             f"VALUES ({', '.join('?' * len(_COLUMNS))})",
             rows,
         )
+        if splits is not None:
+            _write_splits(conn, symbol, splits)
+
+
+def _write_splits(conn, symbol: str, splits: Sequence[tuple[date, float]]) -> None:
+    conn.execute("DELETE FROM splits WHERE symbol = ?", (symbol,))
+    conn.executemany("INSERT OR REPLACE INTO splits (symbol, date, ratio) VALUES (?, ?, ?)",
+                     [(symbol, _iso(d), float(r)) for d, r in splits])
 
 
 def replace_splits(conn, symbol: str, splits: Sequence[tuple[date, float]]) -> None:
     """Make `splits` the symbol's complete list of split events."""
     with conn:
-        conn.execute("DELETE FROM splits WHERE symbol = ?", (symbol,))
-        conn.executemany("INSERT OR REPLACE INTO splits (symbol, date, ratio) VALUES (?, ?, ?)",
-                         [(symbol, _iso(d), float(r)) for d, r in splits])
+        _write_splits(conn, symbol, splits)
 
 
 def read_splits(conn, symbol: str) -> list[tuple[date, float]]:
     return [(date.fromisoformat(d), r) for d, r in conn.execute(
         "SELECT date, ratio FROM splits WHERE symbol = ? ORDER BY date", (symbol,))]
 
-
-def _store_splits(conn, symbol: str, splits: Splits) -> None:
-    """After a full replacement: record the provider's split events, if it reported any."""
-    if symbol in splits:
-        replace_splits(conn, symbol, splits[symbol])
 
 
 def last_dates(conn, symbols: Sequence[str]) -> dict[str, date]:
@@ -198,12 +204,14 @@ def _covers_stored(conn, symbol: str, frame: pd.DataFrame) -> bool:
     return frame["date"].nunique() >= COVERAGE_MIN_RATIO * spanned
 
 
-def _replace_checked(conn, symbol: str, frame: pd.DataFrame, source: str) -> bool:
-    """Replace stored history with `frame`; False (nothing touched) if it is unusable or truncated."""
+def _replace_checked(conn, symbol: str, frame: pd.DataFrame, source: str, splits: Splits) -> bool:
+    """Replace stored history with `frame`, plus its split events when the provider reported any;
+    False (nothing touched) if the frame is unusable or truncated."""
     frame = _usable(frame)
     if frame.empty or not _covers_stored(conn, symbol, frame):
         return False
-    replace_prices(conn, symbol, _with_adj(frame), source)  # replaced rows are gone: no stored ratio
+    # replaced rows are gone: no stored ratio
+    replace_prices(conn, symbol, _with_adj(frame), source, splits.get(symbol))
     return True
 
 
@@ -255,10 +263,9 @@ def _sync_full(conn, providers, full, active_set, today, history_start, report) 
         res = fetch_with_fallback(providers, to_fetch[i : i + FULL_CHUNK_SIZE], history_start, today)
         missing += res.missing
         for sym, frame in res.frames.items():
-            if not _replace_checked(conn, sym, frame, res.sources[sym]):
+            if not _replace_checked(conn, sym, frame, res.sources[sym], res.splits):
                 missing.append(sym)
                 continue
-            _store_splits(conn, sym, res.splits)
             report.updated.append(sym)
             if res.sources[sym] != primary.name:
                 report.via_fallback[sym] = res.sources[sym]
@@ -354,14 +361,12 @@ def sync_prices(
         res = fetch_with_fallback([primary], [*stale, *healing], history_start, today)
         got = res.frames
         for sym in stale:
-            if sym in got and _replace_checked(conn, sym, got[sym], primary.name):
-                _store_splits(conn, sym, res.splits)
+            if sym in got and _replace_checked(conn, sym, got[sym], primary.name, res.splits):
                 refetched.add(sym)
             else:
                 report.missing.append(sym)  # stored rows stay exactly as they were
         for sym, window in healing.items():
-            if sym in got and _replace_checked(conn, sym, got[sym], primary.name):
-                _store_splits(conn, sym, res.splits)
+            if sym in got and _replace_checked(conn, sym, got[sym], primary.name, res.splits):
                 refetched.add(sym)
                 continue
             if sym in got:  # the primary's history is too short to replace the stored one

@@ -11,7 +11,7 @@ from datetime import date, timedelta
 import pandas as pd
 
 from analyzer.config import UniverseRules
-from analyzer.data.price_sync import HISTORY_START, replace_prices, replace_splits
+from analyzer.data.price_sync import HISTORY_START, replace_prices
 from analyzer.data.prices import PriceProvider, fetch_frames_and_splits
 from analyzer.store.db import get_state, set_state, upsert_rows
 from analyzer.universe.members import MAX_BAR_AGE_DAYS
@@ -183,9 +183,7 @@ def screen_young_listings(
             verdicts[ticker] = ("old", today)
             continue  # may have been clipped by the start date: not young inside the window
         if frame is not None:
-            replace_prices(conn, ticker, frame, primary.name)
-            if ticker in splits:
-                replace_splits(conn, ticker, splits[ticker])
+            replace_prices(conn, ticker, frame, primary.name, splits.get(ticker))
         rows.append((ticker, cik_by_ticker[ticker], first.isoformat(), today.isoformat()))
         verdicts[ticker] = ("young", today)
         kept.append(ticker)
