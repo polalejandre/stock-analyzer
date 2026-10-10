@@ -10,9 +10,10 @@ import pandas as pd
 from analyzer.data.edgar.tags import CONCEPT_BY_NAME
 
 _OUT = ["cik", "tag", "period_start", "period_end", "value", "filed", "accession"]
-# Datetime resolution of parsed ISO dates; pandas picks it (us in pandas 3, ns in pandas 2).
-# Every date column is cast to it so that an all-NaT period_start and an empty result match.
-_DT = pd.to_datetime(pd.Series(["2000-01-01"])).dtype
+# One datetime unit for every frame the data layer returns (prices and quarters use it too), so
+# that merges such as pd.merge_asof(prices, facts) work. Every date column is cast to it, so an
+# all-NaT period_start and an empty result match as well.
+_DT = "datetime64[ns]"
 
 
 def _empty() -> pd.DataFrame:
@@ -57,11 +58,20 @@ def load_concept(
     return df.sort_values(["period_end", "period_start"]).reset_index(drop=True)[_OUT]
 
 
-def latest_shares(conn, cik: int, as_of: date,
-                  merges: Mapping[int, Sequence[int]] | None = None) -> float | None:
-    """Shares outstanding from the latest filing known on `as_of`."""
+def latest_shares_dated(conn, cik: int, as_of: date,
+                        merges: Mapping[int, Sequence[int]] | None = None
+                        ) -> tuple[float, date] | None:
+    """(shares outstanding, the date the count is as of) from the latest filing known on `as_of`."""
     for concept in ("shares_outstanding", "diluted_shares"):
         df = load_concept(conn, cik, concept, as_of=as_of, merges=merges)
         if not df.empty:
-            return float(df.sort_values(["period_end", "filed"]).iloc[-1]["value"])
+            row = df.sort_values(["period_end", "filed"]).iloc[-1]
+            return float(row["value"]), row["period_end"].date()
     return None
+
+
+def latest_shares(conn, cik: int, as_of: date,
+                  merges: Mapping[int, Sequence[int]] | None = None) -> float | None:
+    """Shares outstanding from the latest filing known on `as_of`."""
+    known = latest_shares_dated(conn, cik, as_of, merges)
+    return None if known is None else known[0]

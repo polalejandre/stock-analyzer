@@ -4644,7 +4644,7 @@ git commit -m "feat: screen young listings and compute the point-in-time univers
 
 `--tickers` is for quick manual runs: it limits prices and EDGAR to those tickers (plus SPY) and skips the young-listing screen.
 
-The first full run backfills everything: about 1,500 companies' submissions and companyfacts, roughly 50 quarterly insider zips, Form 4 XML for the months since the last published quarter, and ~1,300 price histories. Expect one to two hours. Later runs take minutes.
+The first full run backfills everything: about 1,500 companies' submissions and companyfacts, roughly 50 quarterly insider zips, Form 4 XML for the months since the last published quarter, and ~1,300 price histories. Expect two to four hours on the first run (the Form 4 XML backlog and full price histories dominate). Later runs take minutes.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -5465,7 +5465,7 @@ Commit any fix with its own message, e.g. `fix: match SEC insider dataset column
 - [ ] **Step 3: First full run**
 
 Run: `uv run analyzer update`
-Expected: completes in one to two hours on the first run; each step prints `failed=` at or below 5% and the command exits 0. A run that exits 1 lists the failing items; rerun `uv run analyzer update --step <name>` after fixing or after a transient outage.
+Expected: completes in two to four hours on the first run (Form 4 XML backlog and full price histories dominate); each step prints `failed=` at or below 5% and the command exits 0. A run that exits 1 lists the failing items; rerun `uv run analyzer update --step <name>` after fixing or after a transient outage.
 
 Then run: `uv run analyzer audit`
 Expected: a summary with ~900+ index tickers plus young listings, most with prices and 8+ revenue quarters. Review the flagged list:
@@ -5488,7 +5488,7 @@ uv sync
 cp .env.example .env        # set SEC_USER_AGENT (with your email) and FRED_API_KEY
 uv run pytest               # unit tests, no network
 uv run pytest -m live       # checks against the real data sources
-uv run analyzer update      # first run backfills everything (1–2 hours)
+uv run analyzer update      # first run backfills everything (2–4 hours: Form 4 XML backlog and full price histories dominate)
 uv run analyzer audit       # coverage and data problems
 ```
 ````
@@ -5507,4 +5507,4 @@ git commit -m "test: add live source checks; docs: phase 1 run instructions and 
 ## Self-review notes
 
 - **Spec coverage (phase 1 scope):** universe incl. past members and young listings (Tasks 6, 14), liquidity filter (Task 14), all section 3 sources (Tasks 4–13), data-layer requirements 3.1 (Tasks 3–5), EDGAR quirks 3.2 (Tasks 8–10), point-in-time rules 3.3 for fundamentals and market cap (Tasks 8, 14), freshness and failure handling 11.2 for `update` (Task 15), storage/config 11.3 (Tasks 1–2), testing 12 for the data layer (all tasks, Task 17 live). Out of phase 1 scope by design: features, signals, research, reports, dashboard, `scan`'s stale-price abort (phase 2/3 read `provider_status`), the systemd timer (phase 3).
-- **Known limitations carried into phase 2:** short-term debt picks one tag per period (may undercount); multi-class share counts come from non-dimensional facts only; market cap uses split-adjusted price × last reported shares, so it is off by the split ratio between a split and the next filing; reference ETFs XLC (2018) and XLRE (2015) have no earlier history; delisted tickers often have no yfinance prices (reported by `audit` and by `historical_missing`).
+- **Known limitations carried into phase 2:** short-term debt picks one tag per period (may undercount); multi-class share counts come from non-dimensional facts only; market cap (`analyzer.universe.market_cap.market_cap_on`) is the split-adjusted close × the latest reported share count scaled by every split after the count's date (split events come from yfinance with each full history and live in the `splits` table), and is None when that count is more than 15 months old; a history built from the Nasdaq fallback carries no split events, so its market cap misses splits until the yfinance heal replaces it, and splits before 2009 are not recorded; reference ETFs XLC (2018) and XLRE (2015) have no earlier history; delisted tickers often have no yfinance prices (reported by `audit` and by `historical_missing`).

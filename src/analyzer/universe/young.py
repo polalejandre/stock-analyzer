@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 import re
 from collections.abc import Collection
@@ -10,9 +11,9 @@ from datetime import date, timedelta
 import pandas as pd
 
 from analyzer.config import UniverseRules
-from analyzer.data.price_sync import HISTORY_START, replace_prices
-from analyzer.data.prices import PriceProvider
-from analyzer.store.db import upsert_rows
+from analyzer.data.price_sync import HISTORY_START, replace_prices, replace_splits
+from analyzer.data.prices import PriceProvider, fetch_frames_and_splits
+from analyzer.store.db import get_state, set_state, upsert_rows
 from analyzer.universe.members import MAX_BAR_AGE_DAYS
 
 LISTED_EXCHANGES = {"NYSE", "Nasdaq"}
@@ -20,6 +21,8 @@ _NASDAQ_DERIVATIVE = re.compile(r"[A-Z]{4}[WUR]")          # warrants, units, ri
 _SUFFIX_DERIVATIVE = re.compile(r"-(P[A-Z]?|WS?|WT|U|UN|R|RT)$")  # preferreds, warrants, units
 SCREEN_WINDOW_DAYS = 45  # floor; longer liquidity windows widen it (see screen_window_days)
 CLIPPED_MARGIN = timedelta(days=30)
+VERDICTS_KEY = "young_screen_verdicts"  # sync_state: JSON {ticker: {"verdict", "on"}}
+VERDICT_RECHECK_DAYS = 180  # an "old" ticker is screened again after this long (ticker reuse)
 
 
 def young_candidates(
@@ -66,14 +69,63 @@ def _current_and_liquid(frame: pd.DataFrame, rules: UniverseRules, today: date) 
     return average_dollar_volume(bars, rules.dollar_volume_days) >= rules.min_dollar_volume
 
 
-def _stored_first_dates(conn, tickers: list[str]) -> dict[str, str]:
-    out: dict[str, str] = {}
-    for ticker in tickers:
-        (first,) = conn.execute(
-            "SELECT MIN(date) FROM prices WHERE symbol = ?", (ticker,)).fetchone()
-        if first is not None:
-            out[ticker] = first
+def _first_bars(conn, ticker: str, primary: str) -> tuple[date | None, date | None]:
+    """(first stored bar from the primary provider, first stored bar from any other source)."""
+    first_primary, first_other = conn.execute(
+        "SELECT MIN(CASE WHEN source = ? THEN date END), MIN(CASE WHEN source <> ? THEN date END) "
+        "FROM prices WHERE symbol = ?", (primary, primary, ticker)).fetchone()
+    return (date.fromisoformat(first_primary) if first_primary else None,
+            date.fromisoformat(first_other) if first_other else None)
+
+
+def _primary_first_date(first_primary: date | None, first_other: date | None) -> date | None:
+    """The listing date the stored history supports, or None when it cannot date the listing:
+    rows from a fallback reach back further than the primary's, i.e. the history was built from
+    a fallback that may serve only the last few years (the price sync heals it later)."""
+    if first_primary is None or (first_other is not None and first_other < first_primary):
+        return None
+    return first_primary
+
+
+def revalidate_young_listings(conn, primary: str, history_start: date = HISTORY_START) -> None:
+    """Re-date stored young listings from their primary-provider history: a listing whose first
+    primary bar is now within the clipped margin (e.g. a fallback-built history was healed) is
+    deleted, and one whose first primary bar moved is re-dated. A listing whose history cannot be
+    judged (no primary rows, or older fallback rows still in it) is left as it is."""
+    deleted, moved = [], []
+    for ticker, first_trade in conn.execute(
+            "SELECT ticker, first_trade_date FROM young_listings").fetchall():
+        first = _primary_first_date(*_first_bars(conn, ticker, primary))
+        if first is None:
+            continue
+        if first <= history_start + CLIPPED_MARGIN:
+            deleted.append((ticker,))
+        elif first.isoformat() != first_trade:
+            moved.append((first.isoformat(), ticker))
+    with conn:
+        conn.executemany("DELETE FROM young_listings WHERE ticker = ?", deleted)
+        conn.executemany("UPDATE young_listings SET first_trade_date = ? WHERE ticker = ?", moved)
+
+
+def _load_verdicts(conn) -> dict[str, tuple[str, date]]:
+    """{ticker: (verdict, date judged)}; unreadable state or entries only cost a re-check."""
+    try:
+        raw = json.loads(get_state(conn, VERDICTS_KEY) or "{}")
+    except ValueError:
+        return {}
+    out: dict[str, tuple[str, date]] = {}
+    for ticker, entry in (raw.items() if isinstance(raw, dict) else ()):
+        try:
+            out[ticker] = (str(entry["verdict"]), date.fromisoformat(entry["on"]))
+        except (KeyError, TypeError, ValueError):
+            continue
     return out
+
+
+def _save_verdicts(conn, verdicts: dict[str, tuple[str, date]], today: date) -> None:
+    keep = {t: {"verdict": v, "on": d.isoformat()} for t, (v, d) in sorted(verdicts.items())
+            if (today - d).days < VERDICT_RECHECK_DAYS}
+    set_state(conn, VERDICTS_KEY, json.dumps(keep))
 
 
 def screen_young_listings(
@@ -88,22 +140,37 @@ def screen_young_listings(
 
     Index members are screened too: a stock that IPO'd recently and later joined an index was
     a young listing while it was young. Tickers whose prices are already stored are not
-    downloaded or rewritten; their first stored bar dates the listing.
+    downloaded or rewritten; their first stored bar from the primary provider dates the listing,
+    and a stored history that a fallback reaches back further in is not used this week.
+    Tickers judged "old" (history reaching back to the start) are not screened again for
+    VERDICT_RECHECK_DAYS, so their full histories are not downloaded every week.
     """
+    revalidate_young_listings(conn, primary.name, history_start)
+    verdicts = _load_verdicts(conn)
+    settled_old = {t for t, (v, d) in verdicts.items()
+                   if v == "old" and (today - d).days < VERDICT_RECHECK_DAYS}
     cik_by_ticker = _cik_by_ticker(ticker_map)
-    candidates = [t for t in young_candidates(ticker_map) if t in cik_by_ticker]
+    listed = young_candidates(ticker_map)
+    for t in listed:
+        if t not in cik_by_ticker:
+            verdicts[t] = ("no_cik", today)
+    candidates = [t for t in listed if t in cik_by_ticker and t not in settled_old]
     window_start = today - timedelta(days=screen_window_days(rules))
     recent = primary.fetch(candidates, window_start, today) if candidates else {}
     liquid = sorted(t for t, f in recent.items() if _current_and_liquid(f, rules, today))
 
-    stored_first = _stored_first_dates(conn, liquid)
-    to_download = [t for t in liquid if t not in stored_first]
-    full = primary.fetch(to_download, history_start, today) if to_download else {}
+    stored = {t: _first_bars(conn, t, primary.name) for t in liquid}
+    stored = {t: bars for t, bars in stored.items() if bars != (None, None)}
+    to_download = [t for t in liquid if t not in stored]
+    full, splits = (fetch_frames_and_splits(primary, to_download, history_start, today)
+                    if to_download else ({}, {}))
 
     kept, rows = [], []
     for ticker in liquid:
-        if ticker in stored_first:
-            first = date.fromisoformat(stored_first[ticker])
+        if ticker in stored:
+            first = _primary_first_date(*stored[ticker])
+            if first is None:
+                continue  # fallback-built history: cannot date the listing until it is healed
             frame = None
         elif ticker in full:
             frame = _usable(full[ticker])
@@ -113,10 +180,15 @@ def screen_young_listings(
         else:
             continue
         if first <= history_start + CLIPPED_MARGIN:
+            verdicts[ticker] = ("old", today)
             continue  # may have been clipped by the start date: not young inside the window
         if frame is not None:
             replace_prices(conn, ticker, frame, primary.name)
+            if ticker in splits:
+                replace_splits(conn, ticker, splits[ticker])
         rows.append((ticker, cik_by_ticker[ticker], first.isoformat(), today.isoformat()))
+        verdicts[ticker] = ("young", today)
         kept.append(ticker)
     upsert_rows(conn, "young_listings", ["ticker", "cik", "first_trade_date", "screened_on"], rows)
+    _save_verdicts(conn, verdicts, today)
     return kept

@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import date
 
 from analyzer.config import UniverseRules
-from analyzer.data.edgar.facts_read import latest_shares
+from analyzer.universe.market_cap import market_cap_on
 from analyzer.universe.membership import INDEXES, members_on
 
 BLANK_CHECK_SIC = "6770"
@@ -74,11 +74,10 @@ def universe_on(conn, d: date, rules: UniverseRules,
     for ticker, cik in young:
         if ticker in index_members or cik is None:  # index membership wins
             continue
-        close = _tradable_close(conn, ticker, d, rules)  # cheap checks before the shares lookup
-        if close is None:
+        if _tradable_close(conn, ticker, d, rules) is None:  # cheap checks before the shares lookup
             continue
-        shares = latest_shares(conn, cik, d, merges)
-        if shares is not None and close * shares >= rules.young_min_market_cap:
+        cap = market_cap_on(conn, ticker, cik, d, merges)
+        if cap is not None and cap >= rules.young_min_market_cap:
             picked.append(Member(ticker, cik, "young"))
 
     return sorted(picked, key=lambda m: m.ticker)

@@ -68,11 +68,17 @@ def bars(dates, closes, adj=None, volume=1_000_000.0):
 
 
 class FakeProvider:
-    """PriceProvider over in-memory frames, filtered to the requested window."""
+    """PriceProvider over in-memory frames, filtered to the requested window.
 
-    def __init__(self, name, data):
+    With `splits` ({symbol: [(date, ratio), ...]}) it also reports split events, like yfinance:
+    every returned symbol gets its splits inside the window (an empty list when it has none).
+    Without it, it reports nothing about splits.
+    """
+
+    def __init__(self, name, data, splits=None):
         self.name = name
         self.data = dict(data)
+        self.splits = splits
         self.calls = []
 
     def fetch(self, symbols, start, end):
@@ -86,3 +92,10 @@ class FakeProvider:
             if not f.empty:
                 out[s] = f.reset_index(drop=True)
         return out
+
+    def fetch_with_splits(self, symbols, start, end):
+        out = self.fetch(symbols, start, end)
+        if self.splits is None:
+            return out, {}
+        return out, {s: [(d, r) for d, r in self.splits.get(s, []) if start <= d <= end]
+                     for s in out}

@@ -162,3 +162,69 @@ def test_fallback_chain_asks_next_provider_only_for_missing_symbols():
     assert res.sources == {"X": "a", "Y": "b"}
     assert res.missing == ["Z"]
     assert b.asked == [["Y", "Z"]]
+
+
+# --- final review C1: split events come with the same yfinance request -------------------------
+
+ACTION_FIELDS = [*FIELDS, "Dividends", "Stock Splits"]
+
+
+def _yf_frame_with_actions():
+    idx = pd.DatetimeIndex(["2026-10-07", "2026-10-08", "2026-10-09"], name="Date")
+    cols = pd.MultiIndex.from_product([["AAPL", "MSFT", "DEAD"], ACTION_FIELDS])
+    nan = float("nan")
+    dead = [nan] * 8
+    rows = [
+        [1.0, 2.0, 0.5, 1.5, 1.4, 100, 0.0, 0.0, 5.0, 5.0, 5.0, 5.0, 5.0, 10, 0.0, 0.0, *dead],
+        [nan, nan, nan, nan, nan, nan, 0.0, 10.0, 5.0, 5.0, 5.0, 5.0, 5.0, 10, 0.2, 0.0, *dead],
+        [2.0, 3.0, 1.5, 2.5, 2.4, 200, 0.0, 0.0, 5.0, 5.0, 5.0, 5.0, 5.0, 10, 0.0, 0.0, *dead],
+    ]
+    return pd.DataFrame(rows, index=idx, columns=cols)
+
+
+def test_yfinance_reports_splits_separately_and_keeps_the_price_columns():
+    provider = YFinancePrices(download=lambda *a: _yf_frame_with_actions())
+    frames, splits = provider.fetch_with_splits(["AAPL", "MSFT", "DEAD"], date(2026, 10, 1),
+                                                date(2026, 10, 9))
+    assert sorted(frames) == ["AAPL", "MSFT"]
+    assert all(list(f.columns) == PRICE_COLUMNS for f in frames.values())
+    assert frames["AAPL"]["date"].tolist() == [pd.Timestamp("2026-10-07"), pd.Timestamp("2026-10-09")]
+    # the split day had no bar but the split is still reported; 0 means no split; DEAD is unknown
+    assert splits == {"AAPL": [(date(2026, 10, 8), 10.0)], "MSFT": []}
+    plain = provider.fetch(["AAPL", "MSFT", "DEAD"], date(2026, 10, 1), date(2026, 10, 9))
+    assert sorted(plain) == ["AAPL", "MSFT"]
+    assert plain["AAPL"].equals(frames["AAPL"])
+
+
+def test_yfinance_without_a_splits_column_reports_nothing_about_splits():
+    frames, splits = YFinancePrices(download=lambda *a: _yf_frame()).fetch_with_splits(
+        ["AAPL"], date(2026, 10, 1), date(2026, 10, 9))
+    assert list(frames) == ["AAPL"]
+    assert splits == {}
+
+
+def test_yf_download_asks_for_actions_on_the_same_request(monkeypatch):
+    import yfinance
+
+    seen = {}
+
+    def fake_download(symbols, **kwargs):
+        seen.update(kwargs, symbols=symbols)
+        return pd.DataFrame()
+
+    monkeypatch.setattr(yfinance, "download", fake_download)
+    from analyzer.data.prices import _yf_download
+
+    _yf_download(["AAPL"], date(2026, 1, 2), date(2026, 1, 9))
+    assert seen["actions"] is True
+    assert seen["auto_adjust"] is False
+    assert seen["group_by"] == "ticker"
+    assert seen["end"] == "2026-01-10"
+
+
+def test_fallback_chain_collects_splits_only_from_providers_that_report_them():
+    primary = YFinancePrices(download=lambda *a: _yf_frame_with_actions())
+    res = fetch_with_fallback([primary, StubProvider("b", ["Y"])], ["AAPL", "Y"],
+                              date(2026, 10, 1), date(2026, 10, 9))
+    assert res.sources == {"AAPL": "yfinance", "Y": "b"}
+    assert res.splits == {"AAPL": [(date(2026, 10, 8), 10.0)]}

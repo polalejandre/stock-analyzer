@@ -135,7 +135,7 @@ def test_missing_reference_etfs(conn):
 def _cli_env(monkeypatch, tmp_path, conn, loader):
     conn.commit()
     conn.close()
-    monkeypatch.setenv("SEC_USER_AGENT", "T t@example.com")
+    monkeypatch.setenv("SEC_USER_AGENT", "T t@test.invalid")
     monkeypatch.setenv("ANALYZER_DATA_DIR", str(tmp_path))
     db = load_settings().db_path
     db.parent.mkdir(parents=True, exist_ok=True)
@@ -193,7 +193,7 @@ def test_cli_audit_bad_merges_file_exits_2(conn, monkeypatch, tmp_path):
 
 def test_cli_audit_argument_errors(conn, monkeypatch, tmp_path):
     runner = CliRunner()
-    monkeypatch.setenv("SEC_USER_AGENT", "T t@example.com")
+    monkeypatch.setenv("SEC_USER_AGENT", "T t@test.invalid")
     monkeypatch.setenv("ANALYZER_DATA_DIR", str(tmp_path))
     assert runner.invoke(cli.app, ["audit", "--tickers", " , "]).exit_code == 2
     assert runner.invoke(cli.app, ["audit", "--today", "nope"]).exit_code == 2

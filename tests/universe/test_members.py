@@ -307,9 +307,10 @@ def test_shares_are_only_looked_up_for_liquid_young_listings(conn, monkeypatch):
     add_young(conn, "ILLIQ", 200, "2025-01-02", shares=1e8, volume=1_000.0)
     add_young(conn, "LIQ", 201, "2025-01-02", shares=1e8)
     looked_up = []
-    real = members_module.latest_shares
-    monkeypatch.setattr(members_module, "latest_shares",
-                        lambda c, cik, d, merges=None: looked_up.append(cik) or real(c, cik, d, merges))
+    real = members_module.market_cap_on
+    monkeypatch.setattr(members_module, "market_cap_on",
+                        lambda c, t, cik, d, merges=None: looked_up.append(cik)
+                        or real(c, t, cik, d, merges))
     got = tickers(conn)
     assert "LIQ" in got
     assert "ILLIQ" not in got
