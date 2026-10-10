@@ -30,7 +30,12 @@ class FakeSession:
     def get(self, url, params=None, headers=None, timeout=None):
         params = dict(params or {})
         self.calls.append({"url": url, "params": params, "headers": dict(headers or {})})
-        r = self.handler(url, params) if self.handler else self.responses.pop(0)
+        if self.handler:
+            r = self.handler(url, params)
+        else:
+            if not self.responses:
+                raise AssertionError(f"unexpected extra request to {url}")
+            r = self.responses.pop(0)
         if isinstance(r, Exception):
             raise r
         return r
@@ -38,7 +43,6 @@ class FakeSession:
 
 def fake_client(tmp_path, *, responses=None, handler=None, **kwargs):
     session = FakeSession(responses, handler)
-    client = HttpClient(
-        tmp_path / "cache", "Test test@example.com", session=session, sleep=lambda s: None, **kwargs
-    )
+    kwargs.setdefault("sleep", lambda s: None)
+    client = HttpClient(tmp_path / "cache", "Test test@example.com", session=session, **kwargs)
     return client, session

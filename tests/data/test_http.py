@@ -75,3 +75,40 @@ def test_throttles_to_min_interval(tmp_path):
     client.get_bytes("https://x.test/1")
     client.get_bytes("https://x.test/2")
     assert sleeps == [0.125]
+
+
+def test_invalid_json_response_is_not_cached(tmp_path):
+    client, session = fake_client(
+        tmp_path,
+        responses=[FakeResponse(200, b"<html>oops</html>"), FakeResponse(200, json_data={"a": 1})],
+    )
+    with pytest.raises(FetchError, match="invalid response body"):
+        client.get_json("https://x.test/a", cache_key="k/j")
+    assert not client.cache_path("k/j").exists()
+    assert client.get_json("https://x.test/a", cache_key="k/j") == {"a": 1}
+    assert len(session.calls) == 2
+
+
+def test_cached_invalid_body_is_dropped_and_refetched(tmp_path):
+    client, session = fake_client(
+        tmp_path, responses=[FakeResponse(200, b"")]
+    )
+    client.get_bytes("https://x.test/a", cache_key="k/j")  # stores an unparseable body
+    session.responses.append(FakeResponse(200, json_data={"a": 1}))
+    assert client.get_json("https://x.test/a", cache_key="k/j") == {"a": 1}
+    assert len(session.calls) == 2
+
+
+def test_corrupt_cache_file_is_a_miss(tmp_path):
+    client, session = fake_client(tmp_path, responses=[FakeResponse(200, b"fresh")])
+    client.cache_path("k/a").parent.mkdir(parents=True, exist_ok=True)
+    client.cache_path("k/a").write_bytes(b"garbage, not gzip")
+    assert client.get_text("https://x.test/a", cache_key="k/a") == "fresh"
+    assert len(session.calls) == 1
+
+
+def test_error_message_omits_query_string(tmp_path):
+    client, _ = fake_client(tmp_path, responses=[FakeResponse(400)])
+    with pytest.raises(FetchError) as exc:
+        client.get_bytes("https://x.test/a?api_key=SECRET")
+    assert "SECRET" not in str(exc.value)

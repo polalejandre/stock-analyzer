@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import time
+import zlib
 from collections.abc import Callable
 from datetime import timedelta
 from pathlib import Path
@@ -25,6 +26,11 @@ class NotFound(Exception):
 
 class FetchError(Exception):
     """The request failed after all retries. The message never includes query parameters."""
+
+
+def _safe(url: str) -> str:
+    """The URL without its query string, safe to put in messages and logs."""
+    return url.split("?", 1)[0]
 
 
 class HttpClient:
@@ -63,12 +69,29 @@ class HttpClient:
         params: dict | None = None,
         cache_key: str | None = None,
         max_age: timedelta | None = None,
+        validate: Callable[[bytes], Any] | None = None,
     ) -> bytes:
+        """Return the body. If `validate` raises ValueError, the body is rejected.
+
+        A rejected cached body is dropped and refetched. A rejected fresh body is
+        never cached and raises FetchError.
+        """
         if cache_key is not None:
             cached = self._read_cache(cache_key, max_age)
             if cached is not None:
-                return cached
+                try:
+                    if validate is not None:
+                        validate(cached)
+                    return cached
+                except ValueError:
+                    log.warning("dropping invalid cache entry %s", cache_key)
+                    self.cache_path(cache_key).unlink(missing_ok=True)
         body = self._fetch(url, params)
+        if validate is not None:
+            try:
+                validate(body)
+            except ValueError as exc:
+                raise FetchError(f"invalid response body for {_safe(url)}") from exc
         if cache_key is not None:
             self._write_cache(cache_key, body)
         return body
@@ -77,7 +100,7 @@ class HttpClient:
         return self.get_bytes(url, **kwargs).decode("utf-8", errors="replace")
 
     def get_json(self, url: str, **kwargs) -> Any:
-        return json.loads(self.get_bytes(url, **kwargs))
+        return json.loads(self.get_bytes(url, validate=json.loads, **kwargs))
 
     def _read_cache(self, key: str, max_age: timedelta | None) -> bytes | None:
         path = self.cache_path(key)
@@ -85,7 +108,12 @@ class HttpClient:
             return None
         if max_age is not None and self.now() - path.stat().st_mtime >= max_age.total_seconds():
             return None
-        return gzip.decompress(path.read_bytes())
+        try:
+            return gzip.decompress(path.read_bytes())
+        except (OSError, EOFError, zlib.error):
+            log.warning("corrupt cache file %s, treating as a miss", key)
+            path.unlink(missing_ok=True)
+            return None
 
     def _write_cache(self, key: str, body: bytes) -> None:
         path = self.cache_path(key)
@@ -113,13 +141,13 @@ class HttpClient:
                 error = type(exc).__name__
             else:
                 if resp.status_code == 404:
-                    raise NotFound(url)
+                    raise NotFound(_safe(url))
                 if resp.status_code < 400:
                     return resp.content
                 error = f"HTTP {resp.status_code}"
                 if resp.status_code not in RETRY_STATUSES:
                     break
             if attempt < self.max_retries:
-                log.debug("retrying %s after %s", url, error)
+                log.debug("retrying %s after %s", _safe(url), error)
                 self.sleep(2**attempt)
-        raise FetchError(f"{error} for {url}")
+        raise FetchError(f"{error} for {_safe(url)}")
