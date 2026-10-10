@@ -6,7 +6,7 @@ from datetime import date
 import typer
 
 from analyzer.config import ConfigError, load_rules, load_settings
-from analyzer.pipeline.update import FAILURE_LIMIT, STEPS, build_context, run_update
+from analyzer.pipeline.update import STEPS, build_context, run_update
 
 app = typer.Typer(help="Stock Analyzer engine.", no_args_is_help=True)
 
@@ -23,9 +23,14 @@ def main(verbose: bool = typer.Option(False, "--verbose", "-v", help="Debug logg
 
 
 def _parse_tickers(value: str | None) -> set[str] | None:
-    if not value:
+    if value is None:
         return None
     return {t.strip().upper().replace(".", "-") for t in value.split(",") if t.strip()}
+
+
+def _fail(message: str, code: int = 2):
+    typer.echo(message, err=True)
+    return typer.Exit(code)
 
 
 @app.command()
@@ -35,31 +40,38 @@ def update(
     today: str = typer.Option(None, help="Override today's date (YYYY-MM-DD)."),
 ) -> None:
     """Fetch and store the latest data for the whole universe."""
-    steps = step or list(STEPS)
-    unknown = [s for s in steps if s not in STEPS]
+    unknown = [s for s in step or () if s not in STEPS]
     if unknown:
-        typer.echo(f"Unknown step(s): {', '.join(unknown)}. Choose from: {', '.join(STEPS)}")
-        raise typer.Exit(2)
+        raise _fail(f"Unknown step(s): {', '.join(unknown)}. Choose from: {', '.join(STEPS)}")
+    steps = [s for s in STEPS if not step or s in step]  # canonical order, each once
     try:
         run_day = date.fromisoformat(today) if today else date.today()
     except ValueError as exc:
-        typer.echo(f"Invalid --today {today!r}: expected YYYY-MM-DD")
-        raise typer.Exit(2) from exc
+        raise _fail(f"Invalid --today {today!r}: expected YYYY-MM-DD") from exc
+    subset = _parse_tickers(tickers)
+    if subset is not None and not subset:
+        raise _fail(f"--tickers {tickers!r} names no tickers")
     try:
         settings = load_settings()
         rules = load_rules()
-    except ConfigError as exc:
-        typer.echo(f"Configuration error: {exc}")
-        raise typer.Exit(2) from exc
-    ctx = build_context(settings, rules, run_day, _parse_tickers(tickers))
+    except Exception as exc:  # a missing key or a malformed rules.toml is a configuration problem
+        reason = str(exc) if isinstance(exc, ConfigError) else f"{type(exc).__name__}: {exc}"
+        raise _fail(f"Configuration error: {reason}") from exc
+    if "macro" in steps and not settings.fred_api_key:
+        raise _fail("Configuration error: FRED_API_KEY is not set (the macro step needs it). Get a "
+                    "free key at https://fred.stlouisfed.org/docs/api/api_key.html and add it to .env")
+    ctx = build_context(settings, rules, run_day, subset)
     results = run_update(ctx, steps)
     for r in results:
         latest = r.latest_data_date.isoformat() if r.latest_data_date else "-"
         typer.echo(f"{r.name:9} attempted={r.attempted:<6} failed={len(r.failed):<5} "
                    f"({r.failure_rate:.1%}) latest={latest} {r.detail}")
         for item, err in r.failed[:10]:
-            typer.echo(f"  ! {item}: {err}")
+            typer.echo(f"  ! {item}: {err}", err=True)
         if len(r.failed) > 10:
-            typer.echo(f"  ... {len(r.failed) - 10} more in table fetch_failures")
-    if any(r.failure_rate > FAILURE_LIMIT for r in results):
+            typer.echo(f"  ... {len(r.failed) - 10} more in table fetch_failures", err=True)
+    unhealthy = [r for r in results if not r.healthy]
+    for r in unhealthy:
+        typer.echo(f"FAILED: {r.name} (provider_status not updated)", err=True)
+    if unhealthy:
         raise typer.Exit(1)

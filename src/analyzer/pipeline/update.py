@@ -37,7 +37,8 @@ STEPS = ("universe", "prices", "edgar", "macro")
 FAILURE_LIMIT = 0.05
 YOUNG_SCREEN_EVERY_DAYS = 7
 YOUNG_SCREEN_KEY = "young_screen_last"
-EDGAR_RETRY_KEY = "edgar_retry_ciks"  # sync_state: JSON list of CIKs whose refresh is owed
+EDGAR_RETRY_KEY = "edgar_retry_ciks"  # sync_state: JSON {cik: consecutive failures} of owed refreshes
+EDGAR_RETRY_LIMIT = 10  # a company that fails this many runs in a row is given up on
 
 
 @dataclass
@@ -47,10 +48,15 @@ class StepResult:
     failed: list[tuple[str, str]] = field(default_factory=list)
     latest_data_date: date | None = None
     detail: str = ""
+    phase_failed: bool = False  # a whole phase (not one item) failed, however many items succeeded
 
     @property
     def failure_rate(self) -> float:
         return len(self.failed) / self.attempted if self.attempted else 0.0
+
+    @property
+    def healthy(self) -> bool:
+        return not self.phase_failed and self.failure_rate <= FAILURE_LIMIT
 
 
 @dataclass
@@ -72,13 +78,21 @@ def _err(exc: Exception) -> str:
 def step_universe(ctx: UpdateContext) -> StepResult:
     res = StepResult("universe")
     for index_name in INDEXES:
-        snap = sync_index_snapshots(ctx.conn, ctx.clients.wiki, index_name, ctx.today)
+        try:
+            snap = sync_index_snapshots(ctx.conn, ctx.clients.wiki, index_name, ctx.today)
+        except Exception as exc:  # one index failing must not skip the other
+            log.exception("snapshot sync for %s failed", index_name)
+            res.attempted += 1
+            res.failed.append((index_name, _err(exc)))
+            res.phase_failed = True
+            continue
         res.attempted += snap.attempted
         res.failed += snap.failed
     ticker_map = load_ticker_map(ctx.clients.sec)
     res.attempted += 1
     res.detail = f"tickers={refresh_tickers(ctx.conn, ticker_map, ctx.today)}"
-    res.latest_data_date = ctx.today
+    latest = ctx.conn.execute("SELECT MAX(snapshot_date) FROM index_snapshots").fetchone()[0]
+    res.latest_data_date = date.fromisoformat(latest) if latest else None
     return res
 
 
@@ -97,6 +111,7 @@ def _screen_young_listings(ctx: UpdateContext, res: StepResult) -> None:
     except Exception as exc:  # the prices above are good; the screen is retried next run
         log.exception("young-listing screen failed")
         res.failed.append(("young-screen", _err(exc)))
+        res.phase_failed = True
         return
     set_state(ctx.conn, YOUNG_SCREEN_KEY, ctx.today.isoformat())
     res.detail += f" young_kept={len(kept)}"
@@ -118,83 +133,116 @@ def step_prices(ctx: UpdateContext) -> StepResult:
                 f"refetched={len(report.refetched)} "
                 f"historical_missing={len(report.historical_missing)}"),
     )
+    res.phase_failed = "SPY" in report.missing  # SPY is the market clock behind latest_data_date
     if ctx.tickers is None:
         _screen_young_listings(ctx, res)
     return res
 
 
-def _load_retry(conn: sqlite3.Connection) -> set[int]:
+def _load_retry(conn: sqlite3.Connection) -> dict[int, int]:
+    """{cik: consecutive failed refreshes}. Unreadable state or entries only cost a retry."""
     try:
-        raw = json.loads(get_state(conn, EDGAR_RETRY_KEY) or "[]")
+        raw = json.loads(get_state(conn, EDGAR_RETRY_KEY) or "{}")
     except ValueError:
-        return set()  # unreadable state only costs the retries
-    return {c for c in raw if isinstance(c, int)} if isinstance(raw, list) else set()
+        return {}
+    if isinstance(raw, list):  # the first format: a bare list of CIKs
+        return {c: 0 for c in raw if isinstance(c, int)}
+    owed: dict[int, int] = {}
+    for cik, failures in (raw.items() if isinstance(raw, dict) else ()):
+        try:
+            owed[int(cik)] = int(failures)
+        except (TypeError, ValueError):
+            continue
+    return owed
 
 
-def _save_retry(conn: sqlite3.Connection, owed: set[int]) -> None:
-    set_state(conn, EDGAR_RETRY_KEY, json.dumps(sorted(owed)))
+def _save_retry(conn: sqlite3.Connection, owed: dict[int, int]) -> None:
+    set_state(conn, EDGAR_RETRY_KEY, json.dumps({str(c): owed[c] for c in sorted(owed)}))
 
 
-def _settle(conn: sqlite3.Connection, owed: set[int], cik: int, ok: bool) -> None:
-    """Take `cik` off the retry list once refreshed, put it on when the refresh failed."""
-    if ok and cik in owed:
-        owed.discard(cik)
-    elif not ok and cik not in owed:
-        owed.add(cik)
+def _owe(conn: sqlite3.Connection, owed: dict[int, int], ciks) -> None:
+    """Record that these companies must be refreshed. Called BEFORE the work starts, so a run
+    killed part-way (or after the daily-index pointer moved) cannot lose them."""
+    new = [c for c in ciks if c not in owed]
+    if new:
+        owed.update(dict.fromkeys(new, 0))
+        _save_retry(conn, owed)
+
+
+def _paid(conn: sqlite3.Connection, owed: dict[int, int], cik: int) -> None:
+    if owed.pop(cik, None) is not None:
+        _save_retry(conn, owed)
+
+
+def _failed(conn: sqlite3.Connection, owed: dict[int, int], cik: int) -> None:
+    failures = owed.get(cik, 0) + 1
+    if failures >= EDGAR_RETRY_LIMIT:
+        owed.pop(cik, None)
+        log.warning("giving up retrying CIK %d after %d consecutive failed refreshes", cik, failures)
     else:
-        return
+        owed[cik] = failures
     _save_retry(conn, owed)
 
 
 def step_edgar(ctx: UpdateContext) -> StepResult:
     """Counts one attempt per backfilled company, per refreshed company (changed or owed), per
-    tracked company for the instance fallback, plus one each for the daily index and insider data."""
+    tracked company for the instance fallback, plus one each for the daily index and insider data.
+
+    With a ticker subset only those companies are refreshed, but the daily index is always scanned
+    for every tracked company (its pointer is shared), and the changes outside the subset are
+    left on the retry list for the next full run."""
     res = StepResult("edgar")
     sec = ctx.clients.sec
     ticker_map = load_ticker_map(sec)
     merges = load_cik_merges(ticker_map)
     rows = ctx.conn.execute("SELECT ticker, cik FROM tickers WHERE cik IS NOT NULL").fetchall()
+    everyone = {cik for _, cik in rows}
     tracked = {cik for t, cik in rows if ctx.tickers is None or t in ctx.tickers}
     predecessors = {p for c in tracked for p in merges.get(c, [])}
     known = {r[0] for r in ctx.conn.execute("SELECT cik FROM companies")}
 
     owed = _load_retry(ctx.conn)
+    gone = set(owed) - everyone - {p for c in everyone for p in merges.get(c, [])}
+    if gone:  # no longer tracked
+        for cik in gone:
+            del owed[cik]
+        _save_retry(ctx.conn, owed)
     owed_at_start = set(owed)
 
     backfill = sorted((tracked | predecessors) - known)  # first time seen: full backfill
     for cik in backfill:
         res.attempted += 1
+        _owe(ctx.conn, owed, [cik])  # submissions may be stored and the facts fetch still interrupted
         try:
             refresh_company(ctx.conn, sec, cik, max_age=None if cik in predecessors else timedelta(hours=20))
         except Exception as exc:
             res.failed.append((str(cik), _err(exc)))
-            _settle(ctx.conn, owed, cik, ok=False)  # it may be stored without its facts
+            _failed(ctx.conn, owed, cik)
         else:
-            _settle(ctx.conn, owed, cik, ok=True)
+            _paid(ctx.conn, owed, cik)
 
     # The daily-index pointer moves as soon as the scan finishes, so a company whose refresh fails
     # below would otherwise be forgotten until it files again. Owed CIKs are refreshed in full.
     res.attempted += 1
     try:
-        changed = scan_daily_indexes(ctx.conn, sec, tracked & known, ctx.today)
+        changed = scan_daily_indexes(ctx.conn, sec, everyone & known, ctx.today)
     except FetchError as exc:  # pointer unchanged: the same days are scanned next run
         res.failed.append(("daily-index", _err(exc)))
+        res.phase_failed = True
         changed = {}
-    if changed:  # persisted before any refresh runs, so an interrupted run loses nothing
-        owed |= set(changed)
-        _save_retry(ctx.conn, owed)
+    _owe(ctx.conn, owed, sorted(changed))
 
     retry_now = (owed_at_start & (tracked | predecessors)) - set(backfill)
-    for cik in sorted(set(changed) | retry_now):
+    for cik in sorted((set(changed) & tracked) | retry_now):
         res.attempted += 1
         try:
             refresh_company(ctx.conn, sec, cik, max_age=timedelta(0),
                             facts=cik in retry_now or bool(changed[cik] & PERIODIC_FORMS))
         except Exception as exc:
             res.failed.append((str(cik), _err(exc)))
-            _settle(ctx.conn, owed, cik, ok=False)
+            _failed(ctx.conn, owed, cik)
         else:
-            _settle(ctx.conn, owed, cik, ok=True)
+            _paid(ctx.conn, owed, cik)
 
     for cik in sorted(tracked):
         res.attempted += 1
@@ -211,10 +259,24 @@ def step_edgar(ctx: UpdateContext) -> StepResult:
     except Exception as exc:  # a quarter that will not load must not hide the rest of the step
         log.exception("insider sync failed")
         res.failed.append(("insider", _err(exc)))
+        res.phase_failed = True
 
-    refresh_tickers(ctx.conn, ticker_map, ctx.today)  # SIC-based ETFs for new companies
-    latest = ctx.conn.execute("SELECT MAX(filing_date) FROM filings").fetchone()[0]
-    res.latest_data_date = date.fromisoformat(latest) if latest else None
+    # Late bookkeeping: its failure must not discard the per-company failures collected above.
+    try:
+        refresh_tickers(ctx.conn, ticker_map, ctx.today)  # SIC-based ETFs for new companies
+    except Exception as exc:
+        log.exception("refreshing tickers failed")
+        res.attempted += 1
+        res.failed.append(("refresh-tickers", _err(exc)))
+        res.phase_failed = True
+    try:
+        latest = ctx.conn.execute("SELECT MAX(filing_date) FROM filings").fetchone()[0]
+        res.latest_data_date = date.fromisoformat(latest) if latest else None
+    except Exception as exc:
+        log.exception("reading the latest filing date failed")
+        res.attempted += 1
+        res.failed.append(("latest-date", _err(exc)))
+        res.phase_failed = True
     res.detail = (f"companies={len(tracked)} changed={len(changed)} retried={len(retry_now)} "
                   f"insider_quarters={quarters} form4_xml={xml_filings}")
     return res
@@ -236,7 +298,7 @@ def _record(ctx: UpdateContext, res: StepResult) -> None:
     now = datetime.now(UTC).isoformat(timespec="seconds")
     upsert_rows(ctx.conn, "fetch_failures", ["run_id", "step", "item", "error", "at"],
                 [(ctx.run_id, res.name, item, err, now) for item, err in res.failed])
-    if res.failure_rate <= FAILURE_LIMIT:
+    if res.healthy:
         upsert_rows(ctx.conn, "provider_status",
                     ["provider", "last_success", "latest_data_date", "detail"],
                     [(res.name, now, res.latest_data_date.isoformat() if res.latest_data_date
@@ -254,7 +316,7 @@ def run_update(ctx: UpdateContext, steps: Sequence[str] = STEPS,
             res = funcs[name](ctx)
         except Exception as exc:  # the whole step failed, e.g. a source is down
             log.exception("step %s failed", name)
-            res = StepResult(name, attempted=1, failed=[("*", _err(exc))])
+            res = StepResult(name, attempted=1, failed=[("*", _err(exc))], phase_failed=True)
         _record(ctx, res)
         log.info("step %s: %d/%d failed", name, len(res.failed), res.attempted)
         results.append(res)
