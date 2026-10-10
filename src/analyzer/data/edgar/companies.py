@@ -60,7 +60,8 @@ def fetch_submissions(
         if page.get("filingTo", "9999-12-31") < since.isoformat():
             continue
         older = sec.get_json(SUBMISSIONS_PAGE_URL.format(name=page["name"]),
-                             cache_key=f"sec/submissions/pages/{page['name']}")
+                             cache_key=(f"sec/submissions/pages/{page['name']}"
+                                      f"-{page.get('filingTo')}-{page.get('filingCount')}"))
         frames.append(_filings_frame(older))
     f = pd.concat(frames, ignore_index=True)
     f = f[f["form"].isin(FILING_FORMS) & (f["filing_date"] >= since.isoformat())]

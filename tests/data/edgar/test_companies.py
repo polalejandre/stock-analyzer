@@ -1,4 +1,5 @@
-from datetime import date, datetime
+import json
+from datetime import date, datetime, timedelta
 
 from analyzer.data.edgar.companies import (
     SUBMISSIONS_URL,
@@ -72,3 +73,34 @@ def test_store_submissions(tmp_path):
     store_submissions(conn, fetch_submissions(client, 320193), datetime(2026, 10, 10))
     assert conn.execute("SELECT name, sic FROM companies").fetchall() == [("Apple Inc.", "3571")]
     assert conn.execute("SELECT COUNT(*) FROM filings").fetchone()[0] == 3
+    assert conn.execute(
+        "SELECT report_date, items FROM filings WHERE form='10-Q'").fetchone() == ("2026-06-27", None)
+    store_submissions(conn, fetch_submissions(client, 320193), datetime(2026, 10, 11))
+    assert conn.execute("SELECT COUNT(*) FROM filings").fetchone()[0] == 3
+    assert conn.execute("SELECT COUNT(*) FROM companies").fetchone()[0] == 1
+
+
+def _index_with_count(count):
+    d = json.loads(json.dumps(SUBMISSIONS))
+    d["filings"]["files"] = [{"name": "CIK0000320193-submissions-001.json", "filingFrom": "2012-01-01",
+                              "filingTo": "2016-12-31", "filingCount": count}]
+    return d
+
+
+def test_older_page_refetched_when_filing_count_changes(tmp_path):
+    state = {"count": 10}
+    page_calls = []
+
+    def handler(url, params):
+        if url == SUBMISSIONS_URL.format(cik=320193):
+            return FakeResponse(json_data=_index_with_count(state["count"]))
+        page_calls.append(url)
+        return FakeResponse(json_data=OLD_PAGE)
+
+    client, _ = fake_client(tmp_path, handler=handler)
+    fetch_submissions(client, 320193, max_age=timedelta(0))
+    fetch_submissions(client, 320193, max_age=timedelta(0))
+    assert len(page_calls) == 1
+    state["count"] = 11
+    fetch_submissions(client, 320193, max_age=timedelta(0))
+    assert len(page_calls) == 2
