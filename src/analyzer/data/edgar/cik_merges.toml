@@ -1,0 +1,8 @@
+# Companies whose XBRL history continues under a predecessor CIK, for example after a
+# holding-company reorganization. `ticker` is resolved to its current CIK through SEC's
+# ticker map; a predecessor equal to the current CIK is ignored.
+# Verified by the live test in Task 17 and by `analyzer audit` (flag "check CIK merge").
+
+[[merge]]
+ticker = "XOM"
+predecessor_ciks = [34088]
