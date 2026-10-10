@@ -846,3 +846,12 @@ def test_build_context_wires_the_database_clients_and_providers(tmp_path, monkey
     assert {"prices", "provider_status", "fetch_failures", "sync_state"} <= tables
     assert build_context(settings, load_rules(), TODAY, None).tickers is None
     assert build_context(settings, load_rules(), TODAY, None).run_id != built.run_id
+
+
+def test_step_universe_lists_given_up_months_without_counting_them(ctx, screen, monkeypatch):
+    monkeypatch.setattr(update, "sync_index_snapshots", lambda conn, wiki, name, today: SnapshotSync(
+        attempted=1, skipped=[f"{name} 2013-04-01"] if name == "sp500" else []))
+    result = step_universe(ctx)
+    assert result.attempted == len(INDEXES) + 1
+    assert result.failed == [] and result.healthy
+    assert result.detail == "tickers=7 skipped_months=[sp500 2013-04-01]"

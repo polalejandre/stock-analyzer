@@ -77,6 +77,7 @@ def _err(exc: Exception) -> str:
 
 def step_universe(ctx: UpdateContext) -> StepResult:
     res = StepResult("universe")
+    skipped: list[str] = []
     for index_name in INDEXES:
         try:
             snap = sync_index_snapshots(ctx.conn, ctx.clients.wiki, index_name, ctx.today)
@@ -88,9 +89,12 @@ def step_universe(ctx: UpdateContext) -> StepResult:
             continue
         res.attempted += snap.attempted
         res.failed += snap.failed
+        skipped += snap.skipped
     ticker_map = load_ticker_map(ctx.clients.sec)
     res.attempted += 1
     res.detail = f"tickers={refresh_tickers(ctx.conn, ticker_map, ctx.today)}"
+    if skipped:  # historical months given up on after repeated failures; not counted as failed
+        res.detail += f" skipped_months=[{', '.join(skipped)}]"
     latest = ctx.conn.execute("SELECT MAX(snapshot_date) FROM index_snapshots").fetchone()[0]
     res.latest_data_date = date.fromisoformat(latest) if latest else None
     return res

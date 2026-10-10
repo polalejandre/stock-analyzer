@@ -12,6 +12,7 @@ from datetime import date, timedelta
 import pandas as pd
 
 from analyzer.data.http import HttpClient
+from analyzer.store.db import get_state, set_state
 from analyzer.universe.membership import rebuild_membership
 
 API_URL = "https://en.wikipedia.org/w/api.php"
@@ -19,6 +20,8 @@ INDEX_URL = "https://en.wikipedia.org/w/index.php"
 PAGES = {"sp500": "List_of_S&P_500_companies", "sp400": "List_of_S&P_400_companies"}
 EXPECTED_SIZE = {"sp500": (480, 520), "sp400": (380, 420)}  # sanity bounds per snapshot
 SNAPSHOT_START = {"sp500": date(2010, 1, 1), "sp400": date(2013, 1, 1)}
+MONTH_FAILURES_KEY = "wiki_month_failures"  # sync_state: JSON {"sp500 2013-04-01": failures}
+MONTH_FAILURE_LIMIT = 3  # a historical month failing this many runs in a row is given up on
 
 
 log = logging.getLogger(__name__)
@@ -26,10 +29,11 @@ log = logging.getLogger(__name__)
 
 def _validate_revisions(body: bytes) -> None:
     try:
-        data = json.loads(body)
-        data["query"]["pages"]
+        pages = json.loads(body)["query"]["pages"]
     except (KeyError, TypeError) as exc:
         raise ValueError("unexpected Wikipedia API response") from exc
+    if not isinstance(pages, list) or not pages:
+        raise ValueError("Wikipedia API response has no pages")
 
 
 @dataclass(frozen=True)
@@ -136,6 +140,20 @@ def month_starts(start: date, end: date) -> list[date]:
 class SnapshotSync:
     attempted: int = 0
     failed: list[tuple[str, str]] = field(default_factory=list)
+    skipped: list[str] = field(default_factory=list)  # historical months given up on
+
+
+def _load_failures(conn) -> dict[str, int]:
+    """{"<index> <month>": consecutive failed runs}; unreadable state only costs retries."""
+    try:
+        raw = json.loads(get_state(conn, MONTH_FAILURES_KEY) or "{}")
+    except ValueError:
+        return {}
+    out: dict[str, int] = {}
+    for key, n in (raw.items() if isinstance(raw, dict) else ()):
+        if isinstance(n, int):
+            out[key] = n
+    return out
 
 
 def sync_index_snapshots(
@@ -148,15 +166,28 @@ def sync_index_snapshots(
     if today.day != 1:
         targets.append(today)
     result = SnapshotSync()
+    failures = _load_failures(conn)
+    before = dict(failures)
     today_ok = today.isoformat() in have
     for d in targets:
+        item = f"{index_name} {d}"
+        historical = d != today  # today's snapshot is never given up on
+        if historical and failures.get(item, 0) >= MONTH_FAILURE_LIMIT:
+            result.skipped.append(item)
+            continue
         result.attempted += 1
         when = d + timedelta(days=1) if d == today else d  # today's snapshot = latest revision
         try:
             rev, df = snapshot_for(client, index_name, when, today)
         except Exception as exc:  # one bad month must not stop the rest
-            result.failed.append((f"{index_name} {d}", f"{type(exc).__name__}: {exc}"))
+            result.failed.append((item, f"{type(exc).__name__}: {exc}"))
+            if historical:
+                failures[item] = failures.get(item, 0) + 1
+                if failures[item] == MONTH_FAILURE_LIMIT:
+                    log.warning("giving up on the %s snapshot after %d consecutive failed runs; "
+                                "it is no longer requested", item, MONTH_FAILURE_LIMIT)
             continue
+        failures.pop(item, None)
         rows = [(index_name, d.isoformat(), rev.revid, r.ticker, r.security, r.gics_sector,
                  r.gics_sub_industry, r.date_added) for r in df.itertuples()]
         with conn:
@@ -166,6 +197,8 @@ def sync_index_snapshots(
             )
             conn.executemany("INSERT INTO index_snapshots VALUES (?,?,?,?,?,?,?,?)", rows)
         today_ok = today_ok or d == today
+    if failures != before:
+        set_state(conn, MONTH_FAILURES_KEY, json.dumps(dict(sorted(failures.items()))))
     if today_ok:
         _prune_redundant(conn, index_name, today)
     rebuild_membership(conn, index_name)
