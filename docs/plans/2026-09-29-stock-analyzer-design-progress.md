@@ -537,8 +537,10 @@ Python 3.12 with uv, pandas, stdlib `sqlite3` with a numbered SQL migrations fol
 
 ## 7. Next steps
 
-1. Owner reviews the final spec.
-2. Write the phase 1 implementation plan.
+1. ~~Owner reviews the final spec.~~ Done (`docs/specs/2026-10-10-stock-analyzer-design.md`).
+2. ~~Write the phase 1 implementation plan.~~ Done (`docs/plans/2026-10-10-phase-1-data-layer.md`).
+3. Phase 1 is implemented. The first live run was in progress on 2026-10-10. Resume from
+   `docs/plans/2026-10-10-phase-1-status.md`.
 
 ## 8. Open questions
 
