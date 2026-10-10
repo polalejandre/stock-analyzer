@@ -6,8 +6,9 @@ import pytest
 from analyzer.data.edgar.companyfacts import extract_facts, fetch_companyfacts, store_facts
 from analyzer.data.edgar.facts_read import latest_shares, load_concept
 from analyzer.data.edgar.merges import load_cik_merges
+from analyzer.data.price_sync import read_prices, write_prices
 from analyzer.store.db import connect, migrate
-from tests.helpers import FakeResponse, fake_client
+from tests.helpers import FakeResponse, bars, fake_client
 
 
 def fact(start, end, val, filed, accn, form="10-Q"):
@@ -302,3 +303,23 @@ def test_latest_shares_falls_back_to_diluted_shares_without_shares_outstanding(t
             fact(None, "2023-10-20", 101.0, "2023-11-01", "q3"))}}}, 21))
     assert latest_shares(c, 21, date(2023, 12, 1)) == 101.0
     assert latest_shares(c, 21, date(2023, 9, 1)) == 99.0
+
+
+# --- final review: one datetime unit (ns) across prices, quarters and facts --------------------
+
+def test_load_concept_dates_are_nanosecond_like_prices_and_quarters(conn):
+    populated = load_concept(conn, 1045810, "total_assets")
+    empty = load_concept(conn, 1045810, "revenue", as_of=date(2000, 1, 1))
+    for frame in (populated, empty):
+        for col in ("period_start", "period_end", "filed"):
+            assert str(frame[col].dtype) == "datetime64[ns]"
+
+
+def test_merge_asof_joins_stored_prices_with_facts_known_on_each_day(conn):
+    write_prices(conn, "NVDA", bars(pd.bdate_range("2023-08-23", "2023-08-29"), [10.0] * 5),
+                 "yfinance")
+    prices = read_prices(conn, "NVDA")
+    assets = load_concept(conn, 1045810, "total_assets")[["filed", "value"]]
+    joined = pd.merge_asof(prices, assets, left_on="date", right_on="filed")
+    # total assets filed on 2023-08-25 are unknown on the two days before it
+    assert joined["value"].fillna(0).tolist() == [0, 0, 5000, 5000, 5000]

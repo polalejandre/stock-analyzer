@@ -10,9 +10,10 @@ import pandas as pd
 from analyzer.data.edgar.tags import CONCEPT_BY_NAME
 
 _OUT = ["cik", "tag", "period_start", "period_end", "value", "filed", "accession"]
-# Datetime resolution of parsed ISO dates; pandas picks it (us in pandas 3, ns in pandas 2).
-# Every date column is cast to it so that an all-NaT period_start and an empty result match.
-_DT = pd.to_datetime(pd.Series(["2000-01-01"])).dtype
+# One datetime unit for every frame the data layer returns (prices and quarters use it too), so
+# that merges such as pd.merge_asof(prices, facts) work. Every date column is cast to it, so an
+# all-NaT period_start and an empty result match as well.
+_DT = "datetime64[ns]"
 
 
 def _empty() -> pd.DataFrame:
