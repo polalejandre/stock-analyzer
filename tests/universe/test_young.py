@@ -1,9 +1,9 @@
-from datetime import date
+from datetime import date, timedelta
 
 import pandas as pd
 
 from analyzer.config import UniverseRules
-from analyzer.data.price_sync import read_prices, replace_prices
+from analyzer.data.price_sync import read_prices, replace_prices, write_prices
 from analyzer.store.db import connect, migrate
 from analyzer.universe.young import average_dollar_volume, screen_young_listings, young_candidates
 from tests.helpers import FakeProvider, bars
@@ -186,9 +186,9 @@ def test_screen_records_an_index_ticker_that_ipod_recently_without_downloading_i
         tmp_path):
     conn = fresh_conn(tmp_path)
     full = bars(pd.bdate_range("2021-06-01", "2026-10-09"), 50.0, volume=1_000_000.0)
-    replace_prices(conn, "IPOCO", full, "seed")        # already stored by the price sync
+    replace_prices(conn, "IPOCO", full, "yfinance")    # already stored by the price sync
     tm = ticker_map([(10, "Ipo", "IPOCO", "Nasdaq")])
-    provider = FakeProvider("yfinance", {"IPOCO": full})
+    provider = FakeProvider("yfinance", {"IPOCO": full.assign(close=51.0)})
     kept = screen_young_listings(conn, provider, tm, RULES, TODAY)
     assert kept == ["IPOCO"]
     assert conn.execute("SELECT ticker, cik, first_trade_date, screened_on "
@@ -196,13 +196,13 @@ def test_screen_records_an_index_ticker_that_ipod_recently_without_downloading_i
         ("IPOCO", 10, "2021-06-01", "2026-10-09")]
     assert len(provider.calls) == 1                     # only the short liquidity window
     assert provider.calls[0][1] == date(2026, 8, 25)
-    assert conn.execute("SELECT DISTINCT source FROM prices").fetchall() == [("seed",)]
+    assert set(read_prices(conn, "IPOCO")["close"]) == {50.0}  # stored bars are not rewritten
 
 
 def test_screen_downloads_history_only_for_candidates_with_no_stored_prices(tmp_path):
     conn = fresh_conn(tmp_path)
     stored = bars(pd.bdate_range("2022-01-03", "2026-10-09"), 50.0, volume=1_000_000.0)
-    replace_prices(conn, "HAVE", stored, "seed")
+    replace_prices(conn, "HAVE", stored, "yfinance")
     data = {"HAVE": stored,
             "NEW": bars(pd.bdate_range("2023-03-01", "2026-10-09"), 50.0, volume=1_000_000.0)}
     tm = ticker_map([(10, "Have", "HAVE", "NYSE"), (11, "New", "NEW", "Nasdaq")])
@@ -221,7 +221,7 @@ def test_screen_applies_the_clipped_history_rule_to_stored_prices_too(tmp_path):
     data = {"AT30": bars(pd.bdate_range("2020-01-31", "2026-10-09"), 50.0, volume=1_000_000.0),
             "AT31": bars(pd.bdate_range("2020-02-03", "2026-10-09"), 50.0, volume=1_000_000.0)}
     for t, f in data.items():
-        replace_prices(conn, t, f, "seed")
+        replace_prices(conn, t, f, "yfinance")
     tm = ticker_map([(10, "A", "AT30", "Nasdaq"), (11, "B", "AT31", "Nasdaq")])
     provider = FakeProvider("yfinance", data)
     kept = screen_young_listings(conn, provider, tm, RULES, TODAY, history_start=start)
@@ -269,3 +269,104 @@ def test_screen_full_download_stores_the_listing_splits(tmp_path):
     provider = FakeProvider("yfinance", data, splits={"NEWCO": [(date(2025, 6, 2), 10.0)]})
     assert screen_young_listings(conn, provider, tm, RULES, TODAY) == ["NEWCO"]
     assert read_splits(conn, "NEWCO") == [(date(2025, 6, 2), 10.0)]
+
+
+# --- final review I1: only primary-provider history dates a listing ---------------------------
+
+def _rows(conn):
+    return conn.execute("SELECT ticker, cik, first_trade_date FROM young_listings "
+                        "ORDER BY ticker").fetchall()
+
+
+def _oldco_feeds():
+    nasdaq_days = pd.bdate_range("2016-10-10", "2026-10-09")   # the fallback serves ~10 years
+    nasdaq = FakeProvider("nasdaq", {"OLDCO": bars(nasdaq_days, 100.0, adj=float("nan"),
+                                                   volume=1_000_000.0)})
+    yf = FakeProvider("yfinance", {"OLDCO": bars(pd.bdate_range("2009-01-02", "2026-10-09"),
+                                                 100.0, volume=1_000_000.0)})
+    return yf, nasdaq
+
+
+def test_fallback_built_history_never_makes_an_old_company_young(tmp_path):
+    from analyzer.data.price_sync import sync_prices
+
+    conn = fresh_conn(tmp_path)
+    yf, nasdaq = _oldco_feeds()
+    sync_prices(conn, [FakeProvider("yfinance", {}), nasdaq], ["OLDCO"], [], TODAY)
+    tm = ticker_map([(123, "Old Co", "OLDCO", "NYSE")])
+    assert screen_young_listings(conn, yf, tm, RULES, TODAY) == []
+    assert _rows(conn) == []
+    assert all(c[1] != date(2009, 1, 1) for c in yf.calls)  # stored: not downloaded by the screen
+    # the price sync heals the history from the primary; the next screen judges it old
+    sync_prices(conn, [yf, nasdaq], ["OLDCO"], [], TODAY + timedelta(days=1))
+    assert read_prices(conn, "OLDCO")["date"].min() == pd.Timestamp("2009-01-02")
+    assert screen_young_listings(conn, yf, tm, RULES, TODAY + timedelta(days=7)) == []
+    assert _rows(conn) == []
+
+
+def test_a_row_dated_from_fallback_history_is_deleted_once_the_history_is_healed(tmp_path):
+    from analyzer.data.price_sync import sync_prices
+
+    conn = fresh_conn(tmp_path)
+    yf, nasdaq = _oldco_feeds()
+    sync_prices(conn, [FakeProvider("yfinance", {}), nasdaq], ["OLDCO"], [], TODAY)
+    conn.execute("INSERT INTO young_listings VALUES ('OLDCO', 123, '2016-10-10', '2026-10-09')")
+    tm = ticker_map([(123, "Old Co", "OLDCO", "NYSE")])
+    # still fallback-built: cannot be judged, so the row stays and the sync keeps tracking it
+    screen_young_listings(conn, yf, tm, RULES, TODAY)
+    assert _rows(conn) == [("OLDCO", 123, "2016-10-10")]
+    sync_prices(conn, [yf, nasdaq], ["OLDCO"], [], TODAY + timedelta(days=1))
+    screen_young_listings(conn, FakeProvider("yfinance", {}), tm, RULES, TODAY + timedelta(days=7))
+    assert _rows(conn) == []
+
+
+def test_older_fallback_rows_keep_a_stored_ticker_out_of_this_weeks_screen(tmp_path):
+    conn = fresh_conn(tmp_path)
+    replace_prices(conn, "MIXED", bars(pd.bdate_range("2016-01-04", "2026-09-30"), 50.0,
+                                       adj=float("nan")), "nasdaq")
+    write_prices(conn, "MIXED", bars(pd.bdate_range("2026-10-01", "2026-10-09"), 50.0),
+                 "yfinance")
+    tm = ticker_map([(10, "Mixed", "MIXED", "Nasdaq")])
+    provider = FakeProvider("yfinance", {"MIXED": bars(days(60), 50.0, volume=1_000_000.0)})
+    assert screen_young_listings(conn, provider, tm, RULES, TODAY) == []
+    assert _rows(conn) == []
+    assert len(provider.calls) == 1
+
+
+def test_fallback_rows_after_the_first_primary_bar_do_not_matter(tmp_path):
+    conn = fresh_conn(tmp_path)
+    replace_prices(conn, "NEWCO", bars(pd.bdate_range("2023-03-01", "2026-10-06"), 50.0),
+                   "yfinance")
+    write_prices(conn, "NEWCO", bars(["2026-10-07", "2026-10-08", "2026-10-09"], 50.0,
+                                     adj=float("nan")), "nasdaq")
+    tm = ticker_map([(10, "New", "NEWCO", "Nasdaq")])
+    provider = FakeProvider("yfinance", {"NEWCO": bars(days(60), 50.0, volume=1_000_000.0)})
+    assert screen_young_listings(conn, provider, tm, RULES, TODAY) == ["NEWCO"]
+    assert _rows(conn) == [("NEWCO", 10, "2023-03-01")]
+
+
+def test_rescreen_redates_a_listing_whose_first_primary_bar_moved(tmp_path):
+    conn = fresh_conn(tmp_path)
+    replace_prices(conn, "NEWCO", bars(pd.bdate_range("2023-02-01", "2026-10-09"), 50.0),
+                   "yfinance")   # a refetch brought earlier bars
+    conn.execute("INSERT INTO young_listings VALUES ('NEWCO', 10, '2023-03-01', '2026-10-02')")
+    tm = ticker_map([(10, "New", "NEWCO", "Nasdaq")])
+    screen_young_listings(conn, FakeProvider("yfinance", {}), tm, RULES, TODAY)  # not liquid now
+    assert conn.execute("SELECT ticker, cik, first_trade_date, screened_on "
+                        "FROM young_listings").fetchall() == [
+        ("NEWCO", 10, "2023-02-01", "2026-10-02")]
+
+
+def test_a_correct_young_listing_keeps_its_row(tmp_path):
+    conn = fresh_conn(tmp_path)
+    tm = ticker_map([(10, "New", "NEWCO", "Nasdaq")])
+    data = {"NEWCO": bars(pd.bdate_range("2023-03-01", "2026-10-09"), 50.0, volume=1_000_000.0)}
+    screen_young_listings(conn, FakeProvider("yfinance", data), tm, RULES, TODAY)
+    for later in (TODAY + timedelta(days=7), TODAY + timedelta(days=14)):
+        screen_young_listings(conn, FakeProvider("yfinance", {}), tm, RULES, later)
+        assert _rows(conn) == [("NEWCO", 10, "2023-03-01")]
+    replace_prices(conn, "GONE", bars(pd.bdate_range("2022-01-03", "2023-01-03"), 5.0), "nasdaq")
+    conn.execute("INSERT INTO young_listings VALUES ('GONE', 11, '2022-01-03', '2023-01-09')")
+    screen_young_listings(conn, FakeProvider("yfinance", {}), tm, RULES, TODAY)
+    assert _rows(conn)[0] == ("GONE", 11, "2022-01-03")   # no primary rows: left alone
+
