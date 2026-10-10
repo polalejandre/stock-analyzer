@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import io
+import json
+import logging
 import re
 from dataclasses import dataclass, field
 from datetime import date, timedelta
@@ -19,6 +21,17 @@ EXPECTED_SIZE = {"sp500": (480, 520), "sp400": (380, 420)}  # sanity bounds per 
 SNAPSHOT_START = {"sp500": date(2010, 1, 1), "sp400": date(2013, 1, 1)}
 
 
+log = logging.getLogger(__name__)
+
+
+def _validate_revisions(body: bytes) -> None:
+    try:
+        data = json.loads(body)
+        data["query"]["pages"]
+    except (KeyError, TypeError) as exc:
+        raise ValueError("unexpected Wikipedia API response") from exc
+
+
 @dataclass(frozen=True)
 class Revision:
     revid: int
@@ -26,6 +39,8 @@ class Revision:
 
 
 def normalize_ticker(raw) -> str | None:
+    if raw is None or pd.isna(raw):
+        return None
     t = re.sub(r"\[.*?\]", "", str(raw)).strip().upper().replace(".", "-").replace(" ", "")
     return t if re.fullmatch(r"[A-Z][A-Z0-9-]{0,9}", t) else None
 
@@ -42,7 +57,9 @@ def _text_column(table: pd.DataFrame, column):
 
 def parse_constituents(html: str) -> pd.DataFrame:
     """The first table with >= 50 rows and a symbol/ticker column, in a fixed shape."""
-    for t in pd.read_html(io.StringIO(html), flavor="lxml"):
+    for t in pd.read_html(
+        io.StringIO(html), flavor="lxml"  # default fallback to html5lib raises ImportError
+    ):
         if len(t) < 50 or isinstance(t.columns, pd.MultiIndex):
             continue
         cols = {str(c).lower(): c for c in t.columns}
@@ -74,14 +91,16 @@ def revisions_before(
     client: HttpClient, title: str, when: date, today: date, limit: int = 5
 ) -> list[Revision]:
     final = when <= today - timedelta(days=2)  # older answers can no longer change
-    data = client.get_json(
+    body = client.get_bytes(
         API_URL,
         params={"action": "query", "prop": "revisions", "titles": title, "rvlimit": limit,
                 "rvstart": f"{when.isoformat()}T00:00:00Z", "rvdir": "older",
                 "rvprop": "ids|timestamp", "format": "json", "formatversion": 2},
         cache_key=f"wiki/revisions/{title.replace('&', 'and')}/{when.isoformat()}",
         max_age=None if final else timedelta(hours=12),
+        validate=_validate_revisions,
     )
+    data = json.loads(body)
     revs = data["query"]["pages"][0].get("revisions", [])
     return [Revision(int(r["revid"]), r["timestamp"]) for r in revs]
 
@@ -95,7 +114,9 @@ def snapshot_for(client, index_name: str, when: date, today: date) -> tuple[Revi
     for rev in revisions_before(client, PAGES[index_name], when, today):
         try:
             df = parse_constituents(revision_html(client, rev.revid))
-        except ValueError:
+        except Exception as exc:  # bad/unfetchable revision: try the next-older one
+            log.warning("skipping %s revision %s: %s: %s", index_name, rev.revid,
+                        type(exc).__name__, exc)
             continue
         if lo <= len(df) <= hi:
             return rev, df
@@ -127,6 +148,7 @@ def sync_index_snapshots(
     if today.day != 1:
         targets.append(today)
     result = SnapshotSync()
+    today_ok = today.isoformat() in have
     for d in targets:
         result.attempted += 1
         when = d + timedelta(days=1) if d == today else d  # today's snapshot = latest revision
@@ -143,11 +165,28 @@ def sync_index_snapshots(
                 (index_name, d.isoformat()),
             )
             conn.executemany("INSERT INTO index_snapshots VALUES (?,?,?,?,?,?,?,?)", rows)
-    with conn:
-        conn.execute(
-            "DELETE FROM index_snapshots WHERE index_name = ? AND substr(snapshot_date, 9, 2) <> '01' "
-            "AND snapshot_date <> ?",
-            (index_name, today.isoformat()),
-        )
+        today_ok = today_ok or d == today
+    if today_ok:
+        _prune_redundant(conn, index_name, today)
     rebuild_membership(conn, index_name)
     return result
+
+
+def _prune_redundant(conn, index_name: str, today: date) -> None:
+    """Drop non-month-start snapshots that repeat the previous kept snapshot's tickers."""
+    sets: dict[str, set[str]] = {}
+    for snap_date, ticker in conn.execute(
+        "SELECT snapshot_date, ticker FROM index_snapshots WHERE index_name = ? "
+        "ORDER BY snapshot_date", (index_name,)
+    ):
+        sets.setdefault(snap_date, set()).add(ticker)
+    prev: set[str] | None = None
+    redundant = []
+    for snap_date, members in sets.items():
+        if snap_date[8:10] != "01" and snap_date != today.isoformat() and members == prev:
+            redundant.append((index_name, snap_date))
+            continue
+        prev = members
+    with conn:
+        conn.executemany(
+            "DELETE FROM index_snapshots WHERE index_name = ? AND snapshot_date = ?", redundant)
