@@ -6,8 +6,10 @@ import pytest
 from analyzer.config import UniverseRules
 from analyzer.data.price_sync import replace_prices
 from analyzer.store.db import connect, migrate
+from analyzer.universe import members as members_module
 from analyzer.universe.members import Member, price_symbols, universe_on, young_cutoff
-from tests.helpers import bars
+from analyzer.universe.young import screen_young_listings
+from tests.helpers import FakeProvider, bars
 
 RULES = UniverseRules(min_dollar_volume=25e6, dollar_volume_days=20, young_max_years=5,
                       young_min_market_cap=2e9)
@@ -94,8 +96,11 @@ def tickers(conn, d=D):
     return [m.ticker for m in universe_on(conn, d, RULES)]
 
 
-def test_young_cutoff_is_five_years_back():
-    assert young_cutoff(date(2026, 10, 9), RULES) == date(2021, 10, 9)  # 1826 days (one leap day)
+def test_young_cutoff_is_five_calendar_years_back():
+    assert young_cutoff(date(2026, 10, 9), RULES) == date(2021, 10, 9)
+    assert young_cutoff(date(2028, 3, 1), RULES) == date(2023, 3, 1)    # spans two leap days
+    assert young_cutoff(date(2028, 2, 29), RULES) == date(2023, 2, 28)  # no Feb 29 five years on
+    assert young_cutoff(date(2032, 2, 29), RULES) == date(2027, 2, 28)
 
 
 def test_young_window_is_open_at_the_old_end_and_closed_at_d(conn):
@@ -178,7 +183,8 @@ def test_liquidity_uses_the_last_n_bars_on_or_before_d(conn):
     f["volume"] = vols
     replace_prices(conn, "SWING", f, "yfinance")
     assert "SWING" not in tickers(conn, date(2026, 9, 30))
-    assert "SWING" in tickers(conn, D)           # 5M x $50 on all of the last 20 bars
+    # On D only 7 of the last 20 bars (10-01..10-09) are heavy: 7 x $250M + 13 x $50k over 20
+    assert "SWING" in tickers(conn, D)
 
 
 def test_liquidity_needs_the_full_window_of_bars(conn):
@@ -256,3 +262,92 @@ def test_price_symbols_active_window_follows_today(conn):
     active, historical = price_symbols(conn, date(2031, 10, 9), RULES)
     assert active == ["AAPL", "MID", "THINIDX"]
     assert historical == ["AGED", "BIGNEW", "GONE", "SMALLNEW", "SPACCO"]
+
+
+# --- fix round 1: recency guard, screened index tickers, price_symbols boundary ---------------
+
+def stored_until(conn, ticker, last_bar, n=30, close=50.0, volume=1_000_000.0):
+    replace_prices(conn, ticker, bars(pd.bdate_range(end=last_bar, periods=n), close,
+                                      volume=volume), "yfinance")
+
+
+def test_recency_guard_for_index_members(conn):
+    conn.executemany("INSERT INTO index_membership VALUES (?,?,?,?)",
+                     [("sp500", t, "2010-01-01", None)
+                      for t in ("TEN", "THREE", "SEVEN", "EIGHT")])
+    stored_until(conn, "TEN", date(2026, 9, 29))     # 10 days before D
+    stored_until(conn, "THREE", date(2026, 10, 6))   # 3 days
+    stored_until(conn, "SEVEN", date(2026, 10, 2))   # exactly 7 days: still current
+    stored_until(conn, "EIGHT", date(2026, 10, 1))   # 8 days: stale
+    got = tickers(conn)
+    assert "TEN" not in got
+    assert "EIGHT" not in got
+    assert "THREE" in got
+    assert "SEVEN" in got
+
+
+def test_recency_guard_allows_a_long_weekend(conn):
+    # Monday 2026-10-12 is a holiday-length gap after the Friday 10-09 bar: 3 days
+    assert "AAPL" in tickers(conn, date(2026, 10, 12))
+    assert "AAPL" in tickers(conn, date(2026, 10, 16))       # 7 days after the last bar
+    assert "AAPL" not in tickers(conn, date(2026, 10, 17))   # 8 days after
+
+
+def test_recency_guard_for_young_listings(conn):
+    add_young(conn, "STALEY", 200, "2025-01-02", shares=1e8, prices=False)
+    add_young(conn, "FRESHY", 201, "2025-01-02", shares=1e8, prices=False)
+    stored_until(conn, "STALEY", date(2026, 9, 29))
+    stored_until(conn, "FRESHY", date(2026, 10, 6))
+    got = tickers(conn)
+    assert "STALEY" not in got
+    assert "FRESHY" in got
+
+
+def test_shares_are_only_looked_up_for_liquid_young_listings(conn, monkeypatch):
+    add_young(conn, "ILLIQ", 200, "2025-01-02", shares=1e8, volume=1_000.0)
+    add_young(conn, "LIQ", 201, "2025-01-02", shares=1e8)
+    looked_up = []
+    real = members_module.latest_shares
+    monkeypatch.setattr(members_module, "latest_shares",
+                        lambda c, cik, d, merges=None: looked_up.append(cik) or real(c, cik, d, merges))
+    got = tickers(conn)
+    assert "LIQ" in got
+    assert "ILLIQ" not in got
+    assert 201 in looked_up
+    assert 200 not in looked_up
+
+
+def test_a_screened_index_ticker_is_young_before_it_joins_the_index(conn):
+    """An S&P 500 member that IPO'd in 2021 is a young listing while it was young."""
+    ipo = bars(pd.bdate_range("2021-06-01", "2026-10-09"), 50.0, volume=1_000_000.0)
+    replace_prices(conn, "IPOCO", ipo, "yfinance")           # stored by the price sync
+    conn.execute("INSERT INTO index_membership VALUES ('sp500','IPOCO','2023-01-03',NULL)")
+    conn.execute("INSERT INTO tickers (ticker, cik, updated_at) VALUES ('IPOCO', 400, 'x')")
+    add_shares(conn, 400, 1e8, "2021-08-01")                 # $5B at $50
+    tm = pd.DataFrame([(400, "Ipo", "IPOCO", "Nasdaq")],
+                      columns=["cik", "name", "ticker", "exchange"])
+    kept = screen_young_listings(conn, FakeProvider("yfinance", {"IPOCO": ipo}), tm, RULES, D)
+    assert kept == ["IPOCO"]
+    assert conn.execute("SELECT ticker, cik, first_trade_date FROM young_listings "
+                        "WHERE ticker = 'IPOCO'").fetchall() == [("IPOCO", 400, "2021-06-01")]
+
+    def pick(d):
+        return [m for m in universe_on(conn, d, RULES) if m.ticker == "IPOCO"]
+
+    assert pick(date(2021, 5, 28)) == []                                    # not trading yet
+    assert pick(date(2022, 6, 1)) == [Member("IPOCO", 400, "young")]       # not an index member yet
+    assert pick(date(2023, 6, 1)) == [Member("IPOCO", 400, "sp500")]       # index wins once in it
+    assert pick(date(2026, 10, 9)) == [Member("IPOCO", 400, "sp500")]      # older than 5 years
+
+
+def test_price_symbols_boundary_first_trade_on_the_cutoff_is_historical(conn):
+    cutoff = young_cutoff(D, RULES)
+    conn.executemany("INSERT INTO young_listings VALUES (?,?,?,?)", [
+        ("ONCUT", 300, cutoff.isoformat(), "x"),
+        ("AFTCUT", 301, (cutoff + pd.Timedelta(days=1)).isoformat(), "x"),
+    ])
+    active, historical = price_symbols(conn, D, RULES)
+    assert "ONCUT" in historical
+    assert "ONCUT" not in active
+    assert "AFTCUT" in active
+    assert "AFTCUT" not in historical
