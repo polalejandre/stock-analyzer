@@ -1,6 +1,7 @@
 """Opt-in checks against the real sources: uv run pytest -m live -v"""
 
 import io
+import re
 import zipfile
 from datetime import date, timedelta
 
@@ -13,7 +14,7 @@ from analyzer.data.edgar.companies import fetch_submissions, load_ticker_map
 from analyzer.data.edgar.companyfacts import extract_facts, fetch_companyfacts, store_facts
 from analyzer.data.edgar.daily_index import fetch_master_index
 from analyzer.data.edgar.facts_read import latest_shares, load_concept
-from analyzer.data.edgar.insider_bulk import BULK_URL, parse_insider_zip
+from analyzer.data.edgar.insider_bulk import _fetch_zip, parse_insider_zip
 from analyzer.data.edgar.instance import fetch_instance_facts
 from analyzer.data.edgar.merges import load_cik_merges
 from analyzer.data.edgar.quarters import discrete_quarters
@@ -127,6 +128,9 @@ def test_googl_dual_class_shares(conn, clients, ticker_map):
     print(f"\nGOOGL latest_shares={shares}; stored rows for latest period_end: {stored}")
     # Alphabet Class A+B+C is about 12.1B. Under 7e9 is one class (the summing rule is not
     # engaging); over 20e9 double-counts.
+    assert stored, "no shares_outstanding rows"
+    assert shares == float(stored[-1][3]), (
+        f"latest_shares={shares} is not the latest stored shares_outstanding row: {stored}")
     assert shares is not None and 11e9 <= shares <= 13.5e9, (
         f"latest_shares={shares}; stored shares_outstanding rows: {stored}")
 
@@ -148,25 +152,32 @@ def test_instance_document_of_latest_10q(clients, ticker_map):
 
 
 def test_insider_bulk_columns(clients, ticker_map):
-    data = clients.sec.get_bytes(BULK_URL.format(label="2024q1"),
-                                 cache_key="sec/insider/2024q1.zip")
+    data = _fetch_zip(clients.sec, "2024q1")  # production path: validated before caching
     with zipfile.ZipFile(io.BytesIO(data)) as z:
         names = {n.split("/")[-1].upper() for n in z.namelist()}
     assert {"SUBMISSION.TSV", "REPORTINGOWNER.TSV", "NONDERIV_TRANS.TSV"} <= names
-    rows = parse_insider_zip(data, {cik(ticker_map, t) for t in ("NKE", "PFE", "INTC", "JPM")})
-    assert rows and any(r[8] == "P" for r in rows)
+    rows = parse_insider_zip(data, set(ticker_map["cik"].astype(int)))
+    n_p = sum(r[8] == "P" for r in rows)
+    n_s = sum(r[8] == "S" for r in rows)
+    print(f"\ninsider 2024q1: {len(rows)} rows, {n_p} P, {n_s} S")
+    assert rows and n_p > 0
     # Row layout: (accession, seq, issuer_cik, filing_date, ..., trans_date at 7, trans_code at 8)
-    for label, idx in (("filing_date", 3), ("trans_date", 7)):
-        share = sum(r[idx] is not None for r in rows) / len(rows)
-        assert share >= 0.95, f"only {share:.1%} of rows have a parsed {label} (DD-MON-YYYY?)"
+    assert all(re.fullmatch(r"\d{4}-\d{2}-\d{2}", r[3]) for r in rows)
+    share = sum(r[7] is not None for r in rows) / len(rows)
+    assert share >= 0.95, f"only {share:.1%} of rows have a parsed trans_date (DD-MON-YYYY?)"
 
 
 def test_daily_index_recent_weekday(clients):
-    d = TODAY - timedelta(days=7)
-    while d.weekday() >= 5:
+    d, checked = TODAY - timedelta(days=1), 0
+    while checked < 10:
+        if d.weekday() < 5:
+            checked += 1
+            entries = fetch_master_index(clients.sec, d)
+            if entries is not None and len(entries) > 1000:
+                print(f"\ndaily index worked for {d} ({len(entries)} entries)")
+                return
         d -= timedelta(days=1)
-    entries = fetch_master_index(clients.sec, d)
-    assert entries is None or len(entries) > 1000  # None only on a market holiday
+    pytest.fail("no weekday in the last 10 returned more than 1000 index entries")
 
 
 def test_fred(settings, clients):

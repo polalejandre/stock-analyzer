@@ -18,11 +18,16 @@ Phase 1 (data layer) is implemented. Scoring, research and the dashboard are nex
 
 ```bash
 uv sync
-cp .env.example .env        # set SEC_USER_AGENT (with your email) and FRED_API_KEY
+cp .env.example .env        # must sit in the repo root; set SEC_USER_AGENT (with your email) and FRED_API_KEY
 uv run pytest               # unit tests, no network
-uv run pytest -m live       # checks against the real data sources
+uv run pytest -m live -s -v # checks against the real data sources; -s shows the diagnostic prints
 uv run analyzer update      # first run backfills everything (1–2 hours)
 uv run analyzer audit       # coverage and data problems
+
+# quick runs
+uv run analyzer update --step prices --tickers AAPL,MSFT
+uv run analyzer audit --all                  # list every ticker, not only flagged ones
+uv run analyzer audit --today 2026-10-09     # (update also accepts --today) override today's date
 ```
 
 ## Planned architecture
