@@ -28,16 +28,23 @@ it until phase 1 is closed.
       months got HTTP 429 from Wikipedia; they are retried on the next runs.
       - S&P 500: 195 snapshots, 2010-01 to today.
       - S&P 400: 156 snapshots, 2013-04 to today.
-    - The prices step was running when we stopped: 1,085 symbols and 4.2M bars by 23:30.
-      After it come the EDGAR and macro steps.
+    - The owner asked to stop the run, so it was stopped at 23:34 with SIGTERM. The database
+      integrity check is ok. Stored at that point: 1,085 symbols and 4.2M price bars, and all
+      snapshots. Not run yet: the rest of the prices (from about "S"), the young-listing
+      screen, EDGAR and macro. Expected remaining time: about 2–3 hours, mostly EDGAR.
 
 ## Next steps (resume here)
 
-1. Check whether the first update finished:
-   - `tail -50 data/logs/first-update.log`
-   - Look for the `step <name>: N/M failed` lines and the final summary.
-   - If it was interrupted, run `uv run analyzer update` again. It resumes: stored prices,
-     the cache and the pointers are kept.
+1. Resume the first update (planned for the morning of 2026-10-11):
+   - Run `uv run analyzer update 2>&1 | tee data/logs/update-2026-10-11.log`.
+   - It resumes:
+     - stored prices are only topped up;
+     - delisted misses are skipped for 30 days;
+     - the HTTP cache is reused;
+     - the universe step fetches only today's page and the 19 months that got 429.
+   - Stop it with Ctrl-C in a terminal. A process started in the background with `&` ignores
+     SIGINT; use `kill -TERM <python pid>`, which is safe because every write is a
+     transaction.
 2. Run `uv run analyzer audit`. Record the coverage numbers here:
    - tickers with prices;
    - CIKs mapped;
