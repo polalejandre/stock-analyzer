@@ -14,3 +14,5 @@ def main(verbose: bool = typer.Option(False, "--verbose", "-v", help="Debug logg
         level=logging.DEBUG if verbose else logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    # urllib3 logs full query strings at DEBUG; FRED's api_key is in one.
+    logging.getLogger("urllib3").setLevel(logging.WARNING)

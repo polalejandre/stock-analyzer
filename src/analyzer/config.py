@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import tomllib
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from dotenv import dotenv_values
@@ -20,7 +20,7 @@ class ConfigError(Exception):
 @dataclass(frozen=True)
 class Settings:
     sec_user_agent: str
-    fred_api_key: str | None
+    fred_api_key: str | None = field(repr=False)
     data_dir: Path
 
     @property

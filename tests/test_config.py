@@ -47,3 +47,12 @@ def test_cli_help():
     result = CliRunner().invoke(app, ["--help"])
     assert result.exit_code == 0
     assert "Stock Analyzer" in result.output
+
+
+def test_fred_api_key_not_in_repr(tmp_path):
+    s = load_settings(
+        root=tmp_path,
+        environ={"SEC_USER_AGENT": "a a@example.com", "FRED_API_KEY": "supersecretkey123"},
+    )
+    assert s.fred_api_key == "supersecretkey123"
+    assert "supersecretkey123" not in repr(s)
