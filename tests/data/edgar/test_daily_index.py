@@ -4,6 +4,7 @@ import pytest
 
 from analyzer.data.edgar.daily_index import (
     POINTER_KEY,
+    _require_header,
     next_pointer,
     parse_master_index,
     scan_daily_indexes,
@@ -15,7 +16,7 @@ from tests.helpers import FakeResponse, fake_client
 MASTER = """Description:           Daily Index of EDGAR Dissemination Feed by Company Name
 Last Data Received:    October 6, 2026
 
-CIK|Company Name|Form Type|Date Filed|Filename
+CIK|Company Name|Form Type|Date Filed|File Name
 --------------------------------------------------------------------------------
 320193|Apple Inc.|10-Q|20261006|edgar/data/320193/0000320193-26-000100.txt
 1065280|NETFLIX INC|4|20261006|edgar/data/1065280/0001065280-26-000200.txt
@@ -31,6 +32,16 @@ def test_parse_master_index():
         (999, "8-K", "0000000999-26-000001"),
     ]
     assert entries[0].date_filed == date(2026, 10, 6)
+
+
+@pytest.mark.parametrize("last_column", ["File Name", "Filename"])  # SEC writes "File Name"
+def test_master_index_header_is_recognized(last_column):
+    _require_header(f"CIK|Company Name|Form Type|Date Filed|{last_column}\n-----\n")
+
+
+def test_a_body_without_the_header_is_rejected():
+    with pytest.raises(ValueError):
+        _require_header(b"<html>Request Rate Threshold Exceeded</html>")
 
 
 def test_pointer_waits_for_unpublished_recent_day():

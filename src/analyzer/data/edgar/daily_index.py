@@ -13,7 +13,8 @@ from analyzer.store.db import get_state, set_state
 MASTER_URL = "https://www.sec.gov/Archives/edgar/daily-index/{y}/QTR{q}/master.{ymd}.idx"
 POINTER_KEY = "edgar_daily_index_done"
 HOLIDAY_AFTER_DAYS = 3
-HEADER = "CIK|Company Name|Form Type|Date Filed|Filename"
+# The last column is "File Name" in the published files (some docs say "Filename").
+HEADER = "CIK|Company Name|Form Type|Date Filed|"
 
 log = logging.getLogger(__name__)
 
