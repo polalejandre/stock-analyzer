@@ -9,7 +9,9 @@ from analyzer.data.price_sync import (
     last_dates,
     latest_market_date,
     read_prices,
+    read_splits,
     replace_prices,
+    replace_splits,
     sync_prices,
 )
 from analyzer.store.db import connect, get_state, migrate
@@ -537,3 +539,69 @@ def test_adjustment_refetch_refusal_still_reports_missing(conn):
     rep = sync_prices(conn, [primary], ["NVDA"], [], TODAY)
     assert rep.missing == ["NVDA"] and rep.updated == []
     assert get_state(conn, HEAL_KEY) is None
+
+
+# --- final review C1: split events are stored with every full primary history ----------------
+
+def test_full_primary_history_stores_its_splits_and_fallback_history_stores_none(conn):
+    primary = FakeProvider("yfinance", {"NVDA": bars(["2024-06-07", "2024-06-10"], [120, 121]),
+                                        "KO": bars(["2024-06-07"], [60])},
+                           splits={"NVDA": [(date(2024, 6, 10), 10.0)]})
+    backup = FakeProvider("nasdaq", {"SMH": bars(["2024-06-07"], [200], adj=[float("nan")])})
+    replace_splits(conn, "SMH", [(date(2000, 1, 3), 2.0)])
+    sync_prices(conn, [primary, backup], ["NVDA", "KO", "SMH"], [], TODAY)
+    assert read_splits(conn, "NVDA") == [(date(2024, 6, 10), 10.0)]
+    assert read_splits(conn, "KO") == []
+    assert read_splits(conn, "SMH") == [(date(2000, 1, 3), 2.0)]  # Nasdaq reports no splits
+
+
+def test_adjustment_change_refetch_records_the_new_split(conn):
+    replace_prices(conn, "NVDA", bars(["2026-09-30", "2026-10-01", "2026-10-02"], [100] * 3),
+                   "yfinance")
+    replace_splits(conn, "NVDA", [(date(2021, 7, 20), 4.0)])
+    halved = bars(["2026-09-30", "2026-10-01", "2026-10-02", "2026-10-05"], [50, 50, 50, 51])
+    primary = FakeProvider("yfinance", {"NVDA": halved},
+                           splits={"NVDA": [(date(2021, 7, 20), 4.0), (date(2026, 10, 5), 2.0)]})
+    rep = sync_prices(conn, [primary], ["NVDA"], [], TODAY)
+    assert rep.refetched == ["NVDA"]
+    assert read_splits(conn, "NVDA") == [(date(2021, 7, 20), 4.0), (date(2026, 10, 5), 2.0)]
+
+
+def test_refused_adjustment_refetch_keeps_the_old_splits(conn):
+    replace_prices(conn, "NVDA", bars(pd.bdate_range("2026-06-01", "2026-10-02"), 100.0),
+                   "yfinance")
+    replace_splits(conn, "NVDA", [(date(2021, 7, 20), 4.0)])
+    halved = bars(pd.bdate_range("2026-09-14", "2026-10-05"), 50.0)  # too short to replace
+    primary = FakeProvider("yfinance", {"NVDA": halved},
+                           splits={"NVDA": [(date(2026, 10, 5), 2.0)]})
+    rep = sync_prices(conn, [primary], ["NVDA"], [], TODAY)
+    assert rep.missing == ["NVDA"]
+    assert read_splits(conn, "NVDA") == [(date(2021, 7, 20), 4.0)]  # still the stored basis
+
+
+def test_heal_records_the_primary_splits(conn):
+    dates = list(pd.bdate_range("2026-09-01", periods=24).strftime("%Y-%m-%d"))
+    replace_prices(conn, "SMH", bars(dates, [100.0] * 24), "nasdaq")
+    real = bars([*dates, "2026-10-05"], [100.0] * 25, adj=[98.0] * 24 + [100.0])
+    primary = FakeProvider("yfinance", {"SMH": real}, splits={"SMH": [(date(2026, 9, 2), 3.0)]})
+    rep = sync_prices(conn, [primary], ["SMH"], [], TODAY)
+    assert rep.refetched == ["SMH"]
+    assert read_splits(conn, "SMH") == [(date(2026, 9, 2), 3.0)]
+
+
+def test_stale_symbol_redownload_refreshes_its_splits(conn):
+    replace_prices(conn, "OLD", bars(["2024-06-03", "2024-06-04"], [10, 10]), "yfinance")
+    replace_splits(conn, "OLD", [(date(2024, 6, 4), 5.0)])
+    primary = FakeProvider("yfinance", {"OLD": bars(["2024-06-03", "2024-06-04", "2026-10-09"],
+                                                    [2, 2, 3])}, splits={})
+    sync_prices(conn, [primary], ["OLD"], [], TODAY)
+    assert read_splits(conn, "OLD") == []  # the new full history reports no split
+
+
+def test_incremental_windows_do_not_touch_splits(conn):
+    replace_prices(conn, "AAPL", bars(["2026-10-01", "2026-10-02"], [10, 11]), "yfinance")
+    primary = FakeProvider("yfinance", {"AAPL": bars(["2026-10-01", "2026-10-02", "2026-10-05"],
+                                                     [10, 11, 12])},
+                           splits={"AAPL": [(date(2026, 10, 5), 1.0)]})
+    sync_prices(conn, [primary], ["AAPL"], [], TODAY)
+    assert read_splits(conn, "AAPL") == []

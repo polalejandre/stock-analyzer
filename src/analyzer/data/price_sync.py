@@ -11,6 +11,10 @@ Storage rules that keep adjusted and unadjusted data from mixing:
 - A full replacement must cover the stored range; a truncated response never replaces history.
   A refused heal does not hold the symbol back: its new bars are written as usual and the heal
   is not attempted again for HEAL_RETRY_DAYS.
+- The `splits` table lists the split events the stored closes are adjusted for. It is rewritten
+  together with every full history the primary supplies (new, stale, adjustment-change refetch,
+  heal), because that is when the adjustment basis of the stored closes changes. Fallback
+  histories carry no split events and leave it alone.
 """
 
 from __future__ import annotations
@@ -23,7 +27,7 @@ from datetime import date, timedelta
 
 import pandas as pd
 
-from analyzer.data.prices import PRICE_COLUMNS, PriceProvider, fetch_with_fallback
+from analyzer.data.prices import PRICE_COLUMNS, PriceProvider, Splits, fetch_with_fallback
 from analyzer.store.db import get_state, set_state, upsert_rows
 
 HISTORY_START = date(2009, 1, 1)
@@ -93,6 +97,25 @@ def replace_prices(conn, symbol: str, frame: pd.DataFrame, source: str) -> None:
             f"VALUES ({', '.join('?' * len(_COLUMNS))})",
             rows,
         )
+
+
+def replace_splits(conn, symbol: str, splits: Sequence[tuple[date, float]]) -> None:
+    """Make `splits` the symbol's complete list of split events."""
+    with conn:
+        conn.execute("DELETE FROM splits WHERE symbol = ?", (symbol,))
+        conn.executemany("INSERT OR REPLACE INTO splits (symbol, date, ratio) VALUES (?, ?, ?)",
+                         [(symbol, _iso(d), float(r)) for d, r in splits])
+
+
+def read_splits(conn, symbol: str) -> list[tuple[date, float]]:
+    return [(date.fromisoformat(d), r) for d, r in conn.execute(
+        "SELECT date, ratio FROM splits WHERE symbol = ? ORDER BY date", (symbol,))]
+
+
+def _store_splits(conn, symbol: str, splits: Splits) -> None:
+    """After a full replacement: record the provider's split events, if it reported any."""
+    if symbol in splits:
+        replace_splits(conn, symbol, splits[symbol])
 
 
 def last_dates(conn, symbols: Sequence[str]) -> dict[str, date]:
@@ -232,6 +255,7 @@ def _sync_full(conn, providers, full, active_set, today, history_start, report) 
             if not _replace_checked(conn, sym, frame, res.sources[sym]):
                 missing.append(sym)
                 continue
+            _store_splits(conn, sym, res.splits)
             report.updated.append(sym)
             if res.sources[sym] != primary.name:
                 report.via_fallback[sym] = res.sources[sym]
@@ -324,14 +348,17 @@ def sync_prices(
     refetched: set[str] = set()
     refused_now: list[str] = []
     if stale or healing:
-        got = fetch_with_fallback([primary], [*stale, *healing], history_start, today).frames
+        res = fetch_with_fallback([primary], [*stale, *healing], history_start, today)
+        got = res.frames
         for sym in stale:
             if sym in got and _replace_checked(conn, sym, got[sym], primary.name):
+                _store_splits(conn, sym, res.splits)
                 refetched.add(sym)
             else:
                 report.missing.append(sym)  # stored rows stay exactly as they were
         for sym, window in healing.items():
             if sym in got and _replace_checked(conn, sym, got[sym], primary.name):
+                _store_splits(conn, sym, res.splits)
                 refetched.add(sym)
                 continue
             if sym in got:  # the primary's history is too short to replace the stored one

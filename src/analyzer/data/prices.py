@@ -16,13 +16,32 @@ log = logging.getLogger(__name__)
 
 PRICE_COLUMNS = ["date", "open", "high", "low", "close", "adj_close", "volume"]
 
+# {symbol: [(split date, ratio), ...]}; ratio 10.0 is a 10-for-1 split, 0.1 a 1-for-10 reverse.
+# A symbol that is present with an empty list had no split in the window; an absent symbol means
+# the provider said nothing about its splits.
+Splits = dict[str, list[tuple[date, float]]]
+
 
 class PriceProvider(Protocol):
+    """`fetch` returns split-adjusted bars. A provider that also knows split events offers
+    `fetch_with_splits(symbols, start, end) -> (frames, Splits)` (see `fetch_frames_and_splits`)."""
+
     name: str
 
     def fetch(
         self, symbols: Sequence[str], start: date, end: date
     ) -> dict[str, pd.DataFrame]: ...
+
+
+def fetch_frames_and_splits(
+    provider: PriceProvider, symbols: Sequence[str], start: date, end: date
+) -> tuple[dict[str, pd.DataFrame], Splits]:
+    """Bars, plus split events for the returned symbols when the provider reports them."""
+    with_splits = getattr(provider, "fetch_with_splits", None)
+    if with_splits is None:
+        return provider.fetch(symbols, start, end), {}
+    frames, splits = with_splits(symbols, start, end)
+    return frames, {s: splits[s] for s in frames if s in splits}
 
 
 def _yf_download(symbols: list[str], start: date, end: date) -> pd.DataFrame:
@@ -33,7 +52,7 @@ def _yf_download(symbols: list[str], start: date, end: date) -> pd.DataFrame:
         start=start.isoformat(),
         end=(end + timedelta(days=1)).isoformat(),  # yfinance's end is exclusive
         auto_adjust=False,
-        actions=False,
+        actions=True,  # split events ride on the same request; adds Dividends/Stock Splits columns
         group_by="ticker",
         threads=True,
         progress=False,
@@ -71,6 +90,23 @@ def _split_yf_frame(raw: pd.DataFrame, symbols: Sequence[str]) -> dict[str, pd.D
     return out
 
 
+def _yf_splits(raw: pd.DataFrame, symbols: Sequence[str]) -> Splits:
+    """Non-zero "Stock Splits" values per symbol (yfinance reports 0 on days without a split).
+    Symbols without that column are left out: nothing is known about their splits."""
+    out: Splits = {}
+    if raw is None or raw.empty or not isinstance(raw.columns, pd.MultiIndex):
+        return out
+    present = set(raw.columns.get_level_values(0))
+    for sym in symbols:
+        if sym not in present or "Stock Splits" not in raw[sym].columns:
+            continue
+        ratios = pd.to_numeric(raw[sym]["Stock Splits"], errors="coerce")
+        ratios = ratios[ratios.notna() & (ratios > 0)]
+        days = _normalize_dates(ratios.index)
+        out[sym] = sorted((d.date(), float(r)) for d, r in zip(days, ratios, strict=True))
+    return out
+
+
 class YFinancePrices:
     name = "yfinance"
 
@@ -79,15 +115,24 @@ class YFinancePrices:
         self.batch_size = batch_size
 
     def fetch(self, symbols, start, end):
+        return self.fetch_with_splits(symbols, start, end)[0]
+
+    def fetch_with_splits(self, symbols, start, end) -> tuple[dict[str, pd.DataFrame], Splits]:
         out: dict[str, pd.DataFrame] = {}
+        splits: Splits = {}
         symbols = list(symbols)
         for i in range(0, len(symbols), self.batch_size):
             batch = symbols[i : i + self.batch_size]
             try:
-                out.update(_split_yf_frame(self._download(batch, start, end), batch))
+                raw = self._download(batch, start, end)
+                frames = _split_yf_frame(raw, batch)
+                found = _yf_splits(raw, list(frames))
             except Exception as exc:  # yfinance raises many unrelated exception types
                 log.warning("yfinance batch of %d failed: %s", len(batch), exc)
-        return out
+                continue
+            out.update(frames)
+            splits.update(found)
+        return out, splits
 
 
 NASDAQ_URL = "https://api.nasdaq.com/api/quote/{symbol}/historical"
@@ -156,6 +201,7 @@ class FetchResult:
     frames: dict[str, pd.DataFrame] = field(default_factory=dict)
     sources: dict[str, str] = field(default_factory=dict)
     missing: list[str] = field(default_factory=list)
+    splits: Splits = field(default_factory=dict)  # only for symbols whose provider reports them
 
 
 def fetch_with_fallback(
@@ -167,13 +213,14 @@ def fetch_with_fallback(
         if not remaining:
             break
         try:
-            got = provider.fetch(remaining, start, end)
+            got, splits = fetch_frames_and_splits(provider, remaining, start, end)
         except Exception as exc:  # a broken provider must not stop the chain
             log.warning("price provider %s failed: %s", provider.name, exc)
             continue
         for sym, frame in got.items():
             result.frames[sym] = frame
             result.sources[sym] = provider.name
+        result.splits.update(splits)
         remaining = [s for s in remaining if s not in got]
     result.missing = remaining
     return result

@@ -7,19 +7,33 @@ from analyzer.store.db import connect, get_state, migrate, set_state, upsert_row
 TABLES = {
     "companies", "tickers", "index_snapshots", "index_membership", "young_listings", "prices",
     "facts", "filings", "insider_transactions", "macro", "provider_status", "fetch_failures",
-    "sync_state",
+    "sync_state", "splits",
 }
 
 
 def test_migrate_creates_tables_and_is_idempotent(tmp_path):
     conn = connect(tmp_path / "a.db")
-    assert migrate(conn) == 1
+    assert migrate(conn) == 2
     assert migrate(conn) == 0
     names = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     assert TABLES <= names
     assert conn.execute("SELECT version, name FROM schema_migrations").fetchall() == [
-        (1, "001_initial.sql"),
+        (1, "001_initial.sql"), (2, "002_splits.sql"),
     ]
+
+
+def test_a_database_at_version_1_gets_the_splits_table(tmp_path):
+    from analyzer.store.db import _migration_files
+
+    conn = connect(tmp_path / "a.db")
+    assert migrate(conn, files=_migration_files()[:1]) == 1
+    conn.execute("INSERT INTO sync_state VALUES ('k', 'v')")
+    conn.commit()
+    assert migrate(conn) == 1
+    assert get_state(conn, "k") == "v"
+    conn.execute("INSERT INTO splits VALUES ('NVDA', '2024-06-10', 10.0)")
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute("INSERT INTO splits VALUES ('NVDA', '2024-06-10', 4.0)")
 
 
 def test_wal_mode(tmp_path):

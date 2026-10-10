@@ -256,3 +256,16 @@ def test_screen_rejects_a_candidate_whose_last_bar_is_stale(tmp_path):
     }
     kept = screen_young_listings(conn, FakeProvider("yfinance", data), tm, RULES, TODAY)
     assert kept == ["EDGE", "LONGWE"]
+
+
+# --- final review C1: the screen's full download records split events -------------------------
+
+def test_screen_full_download_stores_the_listing_splits(tmp_path):
+    from analyzer.data.price_sync import read_splits
+
+    conn = fresh_conn(tmp_path)
+    tm = ticker_map([(10, "New", "NEWCO", "Nasdaq")])
+    data = {"NEWCO": bars(pd.bdate_range("2023-03-01", "2026-10-09"), 50.0, volume=1_000_000.0)}
+    provider = FakeProvider("yfinance", data, splits={"NEWCO": [(date(2025, 6, 2), 10.0)]})
+    assert screen_young_listings(conn, provider, tm, RULES, TODAY) == ["NEWCO"]
+    assert read_splits(conn, "NEWCO") == [(date(2025, 6, 2), 10.0)]

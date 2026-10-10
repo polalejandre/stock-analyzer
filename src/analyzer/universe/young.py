@@ -10,8 +10,8 @@ from datetime import date, timedelta
 import pandas as pd
 
 from analyzer.config import UniverseRules
-from analyzer.data.price_sync import HISTORY_START, replace_prices
-from analyzer.data.prices import PriceProvider
+from analyzer.data.price_sync import HISTORY_START, replace_prices, replace_splits
+from analyzer.data.prices import PriceProvider, fetch_frames_and_splits
 from analyzer.store.db import upsert_rows
 from analyzer.universe.members import MAX_BAR_AGE_DAYS
 
@@ -98,7 +98,8 @@ def screen_young_listings(
 
     stored_first = _stored_first_dates(conn, liquid)
     to_download = [t for t in liquid if t not in stored_first]
-    full = primary.fetch(to_download, history_start, today) if to_download else {}
+    full, splits = (fetch_frames_and_splits(primary, to_download, history_start, today)
+                    if to_download else ({}, {}))
 
     kept, rows = [], []
     for ticker in liquid:
@@ -116,6 +117,8 @@ def screen_young_listings(
             continue  # may have been clipped by the start date: not young inside the window
         if frame is not None:
             replace_prices(conn, ticker, frame, primary.name)
+            if ticker in splits:
+                replace_splits(conn, ticker, splits[ticker])
         rows.append((ticker, cik_by_ticker[ticker], first.isoformat(), today.isoformat()))
         kept.append(ticker)
     upsert_rows(conn, "young_listings", ["ticker", "cik", "first_trade_date", "screened_on"], rows)
