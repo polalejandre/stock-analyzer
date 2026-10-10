@@ -1,3 +1,7 @@
+import sqlite3
+
+import pytest
+
 from analyzer.store.db import connect, get_state, migrate, set_state, upsert_rows
 
 TABLES = {
@@ -13,6 +17,9 @@ def test_migrate_creates_tables_and_is_idempotent(tmp_path):
     assert migrate(conn) == 0
     names = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     assert TABLES <= names
+    assert conn.execute("SELECT version, name FROM schema_migrations").fetchall() == [
+        (1, "001_initial.sql"),
+    ]
 
 
 def test_wal_mode(tmp_path):
@@ -44,3 +51,13 @@ def test_sync_state_roundtrip(tmp_path):
     set_state(conn, "k", "v1")
     set_state(conn, "k", "v2")
     assert get_state(conn, "k") == "v2"
+
+
+def test_failed_migration_rolls_back(tmp_path):
+    conn = connect(tmp_path / "a.db")
+    bad = [(1, "001_bad.sql", "CREATE TABLE a (x); CREATE TABLE a (x);")]
+    with pytest.raises(sqlite3.Error):
+        migrate(conn, files=bad)
+    assert conn.execute("SELECT name FROM sqlite_master WHERE name='a'").fetchone() is None
+    assert conn.execute("SELECT COUNT(*) FROM schema_migrations WHERE version=1").fetchone()[0] == 0
+    assert conn.in_transaction is False

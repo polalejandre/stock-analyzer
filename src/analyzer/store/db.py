@@ -24,11 +24,13 @@ def _migration_files() -> list[tuple[int, str, str]]:
     found = []
     for entry in folder.iterdir():
         if entry.name.endswith(".sql"):
-            found.append((int(entry.name.split("_", 1)[0]), entry.name, entry.read_text()))
+            found.append((int(entry.name.split("_", 1)[0]), entry.name, entry.read_text(encoding="utf-8")))
     return sorted(found)
 
 
-def migrate(conn: sqlite3.Connection) -> int:
+def migrate(
+    conn: sqlite3.Connection, files: list[tuple[int, str, str]] | None = None
+) -> int:
     """Apply migrations not yet recorded in schema_migrations. Each runs in one transaction."""
     conn.execute(
         "CREATE TABLE IF NOT EXISTS schema_migrations "
@@ -36,14 +38,18 @@ def migrate(conn: sqlite3.Connection) -> int:
     )
     done = {r[0] for r in conn.execute("SELECT version FROM schema_migrations")}
     applied = 0
-    for version, name, sql in _migration_files():
+    for version, name, sql in files if files is not None else _migration_files():
         if version in done:
             continue
         stamp = datetime.now(UTC).isoformat(timespec="seconds")
-        conn.executescript(
-            f"BEGIN;\n{sql}\n"
-            f"INSERT INTO schema_migrations VALUES ({version}, '{name}', '{stamp}');\nCOMMIT;"
-        )
+        try:
+            conn.executescript(
+                f"BEGIN;\n{sql}\n"
+                f"INSERT INTO schema_migrations VALUES ({version}, '{name}', '{stamp}');\nCOMMIT;"
+            )
+        except sqlite3.Error:
+            conn.rollback()
+            raise
         applied += 1
     return applied
 
