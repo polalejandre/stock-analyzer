@@ -21,7 +21,7 @@ uv sync
 cp .env.example .env        # must sit in the repo root; set SEC_USER_AGENT (with your email) and FRED_API_KEY
 uv run pytest               # unit tests, no network
 uv run pytest -m live -s -v # checks against the real data sources; -s shows the diagnostic prints
-uv run analyzer update      # first run backfills everything (1–2 hours)
+uv run analyzer update      # first run backfills everything (2–4 hours: Form 4 XML backlog and full price histories dominate)
 uv run analyzer audit       # coverage and data problems
 
 # quick runs

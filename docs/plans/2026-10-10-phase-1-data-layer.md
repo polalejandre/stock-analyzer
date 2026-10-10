@@ -4644,7 +4644,7 @@ git commit -m "feat: screen young listings and compute the point-in-time univers
 
 `--tickers` is for quick manual runs: it limits prices and EDGAR to those tickers (plus SPY) and skips the young-listing screen.
 
-The first full run backfills everything: about 1,500 companies' submissions and companyfacts, roughly 50 quarterly insider zips, Form 4 XML for the months since the last published quarter, and ~1,300 price histories. Expect one to two hours. Later runs take minutes.
+The first full run backfills everything: about 1,500 companies' submissions and companyfacts, roughly 50 quarterly insider zips, Form 4 XML for the months since the last published quarter, and ~1,300 price histories. Expect two to four hours on the first run (the Form 4 XML backlog and full price histories dominate). Later runs take minutes.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -5465,7 +5465,7 @@ Commit any fix with its own message, e.g. `fix: match SEC insider dataset column
 - [ ] **Step 3: First full run**
 
 Run: `uv run analyzer update`
-Expected: completes in one to two hours on the first run; each step prints `failed=` at or below 5% and the command exits 0. A run that exits 1 lists the failing items; rerun `uv run analyzer update --step <name>` after fixing or after a transient outage.
+Expected: completes in two to four hours on the first run (Form 4 XML backlog and full price histories dominate); each step prints `failed=` at or below 5% and the command exits 0. A run that exits 1 lists the failing items; rerun `uv run analyzer update --step <name>` after fixing or after a transient outage.
 
 Then run: `uv run analyzer audit`
 Expected: a summary with ~900+ index tickers plus young listings, most with prices and 8+ revenue quarters. Review the flagged list:
@@ -5488,7 +5488,7 @@ uv sync
 cp .env.example .env        # set SEC_USER_AGENT (with your email) and FRED_API_KEY
 uv run pytest               # unit tests, no network
 uv run pytest -m live       # checks against the real data sources
-uv run analyzer update      # first run backfills everything (1–2 hours)
+uv run analyzer update      # first run backfills everything (2–4 hours: Form 4 XML backlog and full price histories dominate)
 uv run analyzer audit       # coverage and data problems
 ```
 ````
