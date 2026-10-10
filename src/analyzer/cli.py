@@ -6,7 +6,13 @@ from datetime import date
 import typer
 
 from analyzer.config import ConfigError, load_rules, load_settings
+from analyzer.data.clients import make_clients
+from analyzer.data.edgar.companies import load_ticker_map
+from analyzer.data.edgar.merges import load_cik_merges
+from analyzer.pipeline.audit import audit as run_audit
+from analyzer.pipeline.audit import summarize
 from analyzer.pipeline.update import STEPS, build_context, run_update
+from analyzer.store.db import connect, migrate
 
 app = typer.Typer(help="Stock Analyzer engine.", no_args_is_help=True)
 
@@ -75,3 +81,37 @@ def update(
         typer.echo(f"FAILED: {r.name} (provider_status not updated)", err=True)
     if unhealthy:
         raise typer.Exit(1)
+
+
+@app.command()
+def audit(
+    tickers: str = typer.Option(None, help="Comma-separated subset."),
+    show_all: bool = typer.Option(False, "--all", help="List every ticker, not only flagged ones."),
+) -> None:
+    """Report data coverage and problems per ticker."""
+    subset = _parse_tickers(tickers)
+    if subset is not None and not subset:
+        raise _fail(f"--tickers {tickers!r} names no tickers")
+    try:
+        settings = load_settings()
+    except Exception as exc:
+        reason = str(exc) if isinstance(exc, ConfigError) else f"{type(exc).__name__}: {exc}"
+        raise _fail(f"Configuration error: {reason}") from exc
+    conn = connect(settings.db_path)
+    migrate(conn)
+    try:
+        merges = load_cik_merges(load_ticker_map(make_clients(settings).sec))
+    except Exception as exc:  # offline or SEC down: audit without CIK merges
+        typer.echo(f"warning: CIK merges not loaded ({type(exc).__name__}: {exc}); "
+                   "auditing without them", err=True)
+        merges = None
+    audits = run_audit(conn, date.today(), merges, subset)
+    for key, value in summarize(audits).items():
+        typer.echo(f"{key:28} {value}")
+    typer.echo("")
+    for a in audits:
+        if a.flags or show_all:
+            typer.echo(f"{a.ticker:8} cik={a.cik if a.cik is not None else '-':<9} "
+                       f"prices={a.price_first or '-'}..{a.price_last or '-'} "
+                       f"rev_q={a.revenue_quarters:<3} etf={a.sector_etf or '-'}/{a.industry_etf or '-'} "
+                       f"{'; '.join(a.flags)}")
