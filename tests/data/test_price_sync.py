@@ -445,3 +445,95 @@ def test_negative_cache_ignores_malformed_state_and_other_symbols(conn):
     rep = sync_prices(conn, [primary], [], ["NEW"], TODAY)
     assert rep.historical_missing == ["NEW"]
     assert json.loads(get_state(conn, "price_historical_misses")) == {"OTHER": "2026-10-01", "NEW": "2026-10-09"}
+
+
+# ---- fix round 2: a refused heal must not degrade the normal path ----
+
+HEAL_KEY = "price_heal_refused"
+
+
+def _nasdaq_history(conn, n=24):
+    dates = list(pd.bdate_range("2026-09-01", periods=n).strftime("%Y-%m-%d"))  # 24 -> ends 2026-10-02
+    replace_prices(conn, "SMH", bars(dates, [100.0] * n), "nasdaq")
+    return dates
+
+
+def _short_primary():
+    """A primary whose history starts 2026-09-21: too short to replace the stored 2026-09-01 start."""
+    dates = list(pd.bdate_range("2026-09-21", periods=12).strftime("%Y-%m-%d"))  # .. 2026-10-06
+    return FakeProvider("yfinance", {"SMH": bars(dates, [101.0] * 12)})
+
+
+def _full_requests(primary):
+    return [c for c in primary.calls if c[1] == date(2009, 1, 1)]
+
+
+def test_refused_heal_still_writes_the_incremental_bars_and_is_not_missing(conn):
+    _nasdaq_history(conn)
+    primary = _short_primary()
+    rep = sync_prices(conn, [primary], ["SMH"], [], TODAY)
+    assert rep.missing == [] and rep.refetched == []
+    assert rep.updated == ["SMH"] and rep.via_fallback == {}
+    got = read_prices(conn, "SMH").set_index(read_prices(conn, "SMH")["date"].dt.strftime("%Y-%m-%d"))
+    assert len(got) == 24 + 2  # 2026-10-05 and 10-06 are new; the older rows stay
+    assert got.loc["2026-10-06", "close"] == 101.0 and got.loc["2026-10-06", "source"] == "yfinance"
+    assert got.loc["2026-09-01", "source"] == "nasdaq"  # the old history was not touched
+    assert len(_full_requests(primary)) == 1  # the heal was tried once
+    assert json.loads(get_state(conn, HEAL_KEY)) == {"SMH": "2026-10-09"}
+
+
+def test_refused_heal_is_not_retried_for_30_days(conn):
+    _nasdaq_history(conn)
+    primary = _short_primary()
+    sync_prices(conn, [primary], ["SMH"], [], TODAY)
+    for days in (1, 29):
+        rep = sync_prices(conn, [primary], ["SMH"], [], TODAY + timedelta(days=days))
+        assert rep.missing == [] and rep.refetched == [] and rep.updated == ["SMH"]
+    assert len(_full_requests(primary)) == 1
+    assert json.loads(get_state(conn, HEAL_KEY)) == {"SMH": "2026-10-09"}
+
+
+def test_refused_heal_is_retried_after_30_days_and_refusal_restarts_the_clock(conn):
+    _nasdaq_history(conn)
+    primary = _short_primary()
+    sync_prices(conn, [primary], ["SMH"], [], TODAY)
+    retry_day = TODAY + timedelta(days=30)
+    rep = sync_prices(conn, [primary], ["SMH"], [], retry_day)
+    assert len(_full_requests(primary)) == 2 and rep.missing == [] and rep.refetched == []
+    assert json.loads(get_state(conn, HEAL_KEY)) == {"SMH": retry_day.isoformat()}
+    sync_prices(conn, [primary], ["SMH"], [], retry_day + timedelta(days=1))
+    assert len(_full_requests(primary)) == 2
+
+
+def test_heal_succeeds_on_retry_and_clears_the_refusal(conn):
+    dates = _nasdaq_history(conn)
+    primary = _short_primary()
+    sync_prices(conn, [primary], ["SMH"], [], TODAY)
+    primary.data["SMH"] = bars([*dates, "2026-10-05", "2026-10-06"], [101.0] * 26)  # now a full history
+    retry_day = TODAY + timedelta(days=30)
+    rep = sync_prices(conn, [primary], ["SMH"], [], retry_day)
+    assert rep.refetched == ["SMH"] and rep.missing == []
+    got = read_prices(conn, "SMH")
+    assert len(got) == 26 and set(got["source"]) == {"yfinance"}
+    assert json.loads(get_state(conn, HEAL_KEY)) == {}
+
+
+def test_heal_refetch_that_returns_nothing_falls_through_and_is_retried_next_run(conn):
+    _nasdaq_history(conn)
+    window = bars(["2026-09-21", "2026-10-02", "2026-10-05"], [100.0, 100.0, 101.0])
+    primary = ScriptedProvider("yfinance", [{"SMH": window}, None])  # the full request comes back empty
+    rep = sync_prices(conn, [primary], ["SMH"], [], TODAY)
+    assert rep.updated == ["SMH"] and rep.missing == [] and rep.refetched == []
+    assert read_prices(conn, "SMH")["close"].tolist()[-1] == 101.0
+    assert get_state(conn, HEAL_KEY) is None  # transient: no 30-day back-off
+
+
+def test_adjustment_refetch_refusal_still_reports_missing(conn):
+    # only a heal falls through; a changed adjustment with a refused refetch must not write new rows
+    replace_prices(conn, "NVDA", _daily(24), "yfinance")
+    window = bars(["2026-09-18", "2026-09-21", "2026-09-22", "2026-10-01", "2026-10-02", "2026-10-05"], [50] * 6)
+    truncated = bars(["2026-10-01", "2026-10-02", "2026-10-05"], [50] * 3)
+    primary = ScriptedProvider("yfinance", [{"NVDA": window}, {"NVDA": truncated}])
+    rep = sync_prices(conn, [primary], ["NVDA"], [], TODAY)
+    assert rep.missing == ["NVDA"] and rep.updated == []
+    assert get_state(conn, HEAL_KEY) is None
