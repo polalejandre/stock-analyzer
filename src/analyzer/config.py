@@ -11,6 +11,7 @@ from pathlib import Path
 from dotenv import dotenv_values
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+PLACEHOLDER_DOMAIN = "example.com"  # the .env.example address; SEC may block it
 
 
 class ConfigError(Exception):
@@ -40,6 +41,11 @@ def load_settings(root: Path = PROJECT_ROOT, environ: Mapping[str, str] | None =
         raise ConfigError(
             "SEC_USER_AGENT must be set and include a contact email, "
             "e.g. 'StockAnalyzer you@example.com' (SEC requirement). See .env.example."
+        )
+    if PLACEHOLDER_DOMAIN in user_agent.lower():
+        raise ConfigError(
+            "SEC_USER_AGENT still holds the .env.example placeholder address; "
+            "set a real contact email (SEC requirement)."
         )
     data_dir = Path(env.get("ANALYZER_DATA_DIR") or root / "data")
     return Settings(

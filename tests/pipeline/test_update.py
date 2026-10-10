@@ -79,7 +79,7 @@ def test_step_prices_with_ticker_subset(ctx):
 
 
 def test_cli_exit_codes(monkeypatch, tmp_path):
-    monkeypatch.setenv("SEC_USER_AGENT", "T t@example.com")
+    monkeypatch.setenv("SEC_USER_AGENT", "T t@test.invalid")
     monkeypatch.setenv("FRED_API_KEY", "k")  # every step is selected by default, macro included
     monkeypatch.setenv("ANALYZER_DATA_DIR", str(tmp_path))
     monkeypatch.setattr(cli, "build_context", lambda *a, **k: None)
@@ -104,13 +104,13 @@ def test_cli_config_error(monkeypatch, tmp_path):
 
 
 def test_unknown_step_is_rejected(monkeypatch, tmp_path):
-    monkeypatch.setenv("SEC_USER_AGENT", "T t@example.com")
+    monkeypatch.setenv("SEC_USER_AGENT", "T t@test.invalid")
     result = CliRunner().invoke(cli.app, ["update", "--step", "nope"])
     assert result.exit_code == 2
 
 
 def test_cli_passes_options_to_the_pipeline(monkeypatch, tmp_path):
-    monkeypatch.setenv("SEC_USER_AGENT", "T t@example.com")
+    monkeypatch.setenv("SEC_USER_AGENT", "T t@test.invalid")
     monkeypatch.setenv("FRED_API_KEY", "k")
     monkeypatch.setenv("ANALYZER_DATA_DIR", str(tmp_path))
     seen = {}
@@ -133,7 +133,7 @@ def test_cli_passes_options_to_the_pipeline(monkeypatch, tmp_path):
 
 
 def test_cli_rejects_a_malformed_date(monkeypatch, tmp_path):
-    monkeypatch.setenv("SEC_USER_AGENT", "T t@example.com")
+    monkeypatch.setenv("SEC_USER_AGENT", "T t@test.invalid")
     monkeypatch.setenv("ANALYZER_DATA_DIR", str(tmp_path))
     result = CliRunner().invoke(cli.app, ["update", "--today", "10/09/2026"])
     assert result.exit_code == 2
@@ -693,7 +693,7 @@ def test_a_step_that_raises_is_unhealthy(ctx):
 def test_the_cli_fails_on_a_phase_failure_below_the_item_limit(monkeypatch, ctx, world):
     _crowd(ctx.conn)
     world.scan_error = FetchError("invalid response body for u")  # SEC daily index down
-    monkeypatch.setenv("SEC_USER_AGENT", "T t@example.com")
+    monkeypatch.setenv("SEC_USER_AGENT", "T t@test.invalid")
     monkeypatch.setattr(cli, "build_context", lambda *a, **k: ctx)
     result = CliRunner().invoke(cli.app, ["update", "--step", "edgar"])
     assert result.exit_code == 1
@@ -703,7 +703,7 @@ def test_the_cli_fails_on_a_phase_failure_below_the_item_limit(monkeypatch, ctx,
 
 
 def test_cli_reports_problems_on_stderr_and_the_summary_on_stdout(monkeypatch):
-    monkeypatch.setenv("SEC_USER_AGENT", "T t@example.com")
+    monkeypatch.setenv("SEC_USER_AGENT", "T t@test.invalid")
     monkeypatch.setattr(cli, "build_context", lambda *a, **k: None)
     bad = StepResult("prices", attempted=500, failed=[("SPY", "no data")], phase_failed=True)
     monkeypatch.setattr(cli, "run_update", lambda ctx, steps: [bad])
@@ -727,7 +727,7 @@ def no_build(monkeypatch):
 
 
 def test_cli_checks_the_fred_key_before_running_when_macro_is_selected(monkeypatch, no_build):
-    monkeypatch.setenv("SEC_USER_AGENT", "T t@example.com")
+    monkeypatch.setenv("SEC_USER_AGENT", "T t@test.invalid")
     monkeypatch.setenv("FRED_API_KEY", "")  # overrides any key in a developer's .env
     for args in (["update"], ["update", "--step", "macro"]):
         result = CliRunner().invoke(cli.app, args)
@@ -736,7 +736,7 @@ def test_cli_checks_the_fred_key_before_running_when_macro_is_selected(monkeypat
 
 
 def test_cli_does_not_need_the_fred_key_without_the_macro_step(monkeypatch):
-    monkeypatch.setenv("SEC_USER_AGENT", "T t@example.com")
+    monkeypatch.setenv("SEC_USER_AGENT", "T t@test.invalid")
     monkeypatch.setenv("FRED_API_KEY", "")
     monkeypatch.setattr(cli, "build_context", lambda *a, **k: None)
     monkeypatch.setattr(cli, "run_update", lambda ctx, steps: [])
@@ -745,7 +745,7 @@ def test_cli_does_not_need_the_fred_key_without_the_macro_step(monkeypatch):
 
 @pytest.mark.parametrize("value", [",", " , ", ""])
 def test_cli_rejects_tickers_that_name_nothing(monkeypatch, no_build, value):
-    monkeypatch.setenv("SEC_USER_AGENT", "T t@example.com")
+    monkeypatch.setenv("SEC_USER_AGENT", "T t@test.invalid")
     monkeypatch.setenv("FRED_API_KEY", "k")
     result = CliRunner().invoke(cli.app, ["update", "--tickers", value])
     assert result.exit_code == 2
@@ -753,7 +753,7 @@ def test_cli_rejects_tickers_that_name_nothing(monkeypatch, no_build, value):
 
 
 def test_cli_treats_an_unreadable_rules_file_as_a_configuration_error(monkeypatch, no_build):
-    monkeypatch.setenv("SEC_USER_AGENT", "T t@example.com")
+    monkeypatch.setenv("SEC_USER_AGENT", "T t@test.invalid")
     monkeypatch.setenv("FRED_API_KEY", "k")
 
     def broken():
@@ -766,7 +766,7 @@ def test_cli_treats_an_unreadable_rules_file_as_a_configuration_error(monkeypatc
 
 
 def test_cli_unknown_step_goes_to_stderr(monkeypatch, no_build):
-    monkeypatch.setenv("SEC_USER_AGENT", "T t@example.com")
+    monkeypatch.setenv("SEC_USER_AGENT", "T t@test.invalid")
     result = CliRunner().invoke(cli.app, ["update", "--step", "nope"])
     assert result.exit_code == 2
     assert "Unknown step(s): nope" in result.stderr
@@ -780,7 +780,7 @@ FRED_KEY = "FAKEKEY-9f8e7d6c"
 def macro_world(ctx, tmp_path, handler):
     client, session = fake_client(tmp_path, handler=handler)
     ctx.clients = SimpleNamespace(fred=client)
-    ctx.settings = Settings(sec_user_agent="T t@example.com", fred_api_key=FRED_KEY,
+    ctx.settings = Settings(sec_user_agent="T t@test.invalid", fred_api_key=FRED_KEY,
                             data_dir=tmp_path)
     return session
 
@@ -817,7 +817,7 @@ def test_step_macro_failed_series_are_items_and_never_show_the_key(ctx, tmp_path
 
 def test_cli_output_and_logs_never_contain_the_fred_key(monkeypatch, ctx, tmp_path, caplog):
     caplog.set_level(logging.DEBUG)
-    monkeypatch.setenv("SEC_USER_AGENT", "T t@example.com")
+    monkeypatch.setenv("SEC_USER_AGENT", "T t@test.invalid")
     monkeypatch.setenv("FRED_API_KEY", FRED_KEY)
     macro_world(ctx, tmp_path, lambda url, p: FakeResponse(status_code=500))
     monkeypatch.setattr(cli, "build_context", lambda settings, rules, today, tickers: ctx)
@@ -833,14 +833,14 @@ def test_build_context_wires_the_database_clients_and_providers(tmp_path, monkey
         raise AssertionError("build_context must not touch the network")
 
     monkeypatch.setattr("requests.Session.request", no_network)
-    settings = Settings(sec_user_agent="T t@example.com", fred_api_key=None,
+    settings = Settings(sec_user_agent="T t@test.invalid", fred_api_key=None,
                         data_dir=tmp_path / "data")
     built = build_context(settings, load_rules(), TODAY, {"AAPL"})
     assert built.settings is settings
     assert (built.today, built.tickers) == (TODAY, {"AAPL"})
     assert len(built.run_id) == 12
     assert [p.name for p in built.price_providers] == ["yfinance", "nasdaq"]
-    assert built.clients.sec.headers["User-Agent"] == "T t@example.com"
+    assert built.clients.sec.headers["User-Agent"] == "T t@test.invalid"
     assert (tmp_path / "data" / "analyzer.db").exists()
     tables = {r[0] for r in built.conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     assert {"prices", "provider_status", "fetch_failures", "sync_state"} <= tables

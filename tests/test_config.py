@@ -6,25 +6,25 @@ from analyzer.config import PROJECT_ROOT, ConfigError, load_rules, load_settings
 
 
 def test_settings_read_env_file(tmp_path):
-    (tmp_path / ".env").write_text("SEC_USER_AGENT=StockAnalyzer me@example.com\nFRED_API_KEY=abc\n")
+    (tmp_path / ".env").write_text("SEC_USER_AGENT=StockAnalyzer me@test.invalid\nFRED_API_KEY=abc\n")
     s = load_settings(root=tmp_path, environ={})
-    assert s.sec_user_agent == "StockAnalyzer me@example.com"
+    assert s.sec_user_agent == "StockAnalyzer me@test.invalid"
     assert s.fred_api_key == "abc"
     assert s.db_path == tmp_path / "data" / "analyzer.db"
     assert s.cache_dir == tmp_path / "data" / "cache"
 
 
 def test_environment_overrides_env_file(tmp_path):
-    (tmp_path / ".env").write_text("SEC_USER_AGENT=old old@example.com\n")
-    s = load_settings(root=tmp_path, environ={"SEC_USER_AGENT": "new new@example.com"})
-    assert s.sec_user_agent == "new new@example.com"
+    (tmp_path / ".env").write_text("SEC_USER_AGENT=old old@test.invalid\n")
+    s = load_settings(root=tmp_path, environ={"SEC_USER_AGENT": "new new@test.invalid"})
+    assert s.sec_user_agent == "new new@test.invalid"
     assert s.fred_api_key is None
 
 
 def test_data_dir_override(tmp_path):
     s = load_settings(
         root=tmp_path,
-        environ={"SEC_USER_AGENT": "a a@example.com", "ANALYZER_DATA_DIR": str(tmp_path / "x")},
+        environ={"SEC_USER_AGENT": "a a@test.invalid", "ANALYZER_DATA_DIR": str(tmp_path / "x")},
     )
     assert s.data_dir == tmp_path / "x"
 
@@ -52,7 +52,20 @@ def test_cli_help():
 def test_fred_api_key_not_in_repr(tmp_path):
     s = load_settings(
         root=tmp_path,
-        environ={"SEC_USER_AGENT": "a a@example.com", "FRED_API_KEY": "supersecretkey123"},
+        environ={"SEC_USER_AGENT": "a a@test.invalid", "FRED_API_KEY": "supersecretkey123"},
     )
     assert s.fred_api_key == "supersecretkey123"
     assert "supersecretkey123" not in repr(s)
+
+
+@pytest.mark.parametrize("agent", ["StockAnalyzer you@example.com", "Me me@EXAMPLE.COM",
+                                   "x x@mail.example.com"])
+def test_placeholder_contact_email_is_rejected(tmp_path, agent):
+    with pytest.raises(ConfigError, match="set a real contact email"):
+        load_settings(root=tmp_path, environ={"SEC_USER_AGENT": agent})
+
+
+def test_env_example_placeholder_is_rejected(tmp_path):
+    (tmp_path / ".env").write_text((PROJECT_ROOT / ".env.example").read_text())
+    with pytest.raises(ConfigError, match="set a real contact email"):
+        load_settings(root=tmp_path, environ={})
