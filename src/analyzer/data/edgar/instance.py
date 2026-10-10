@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import json
 import logging
+import math
 import re
 import xml.etree.ElementTree as ET
 from datetime import date, timedelta
 
-from analyzer.data.edgar.companyfacts import store_facts
+from analyzer.data.edgar.companyfacts import _sum_share_classes, store_facts
 from analyzer.data.edgar.tags import CONCEPT_BY_TAG
 from analyzer.data.http import FetchError, HttpClient, NotFound
 
@@ -46,25 +48,47 @@ def _namespace_prefix(uri: str) -> str | None:
     return None
 
 
+_CLASS_AXIS = "StatementClassOfStockAxis"
+_SHARES_TAG = "dei:EntityCommonStockSharesOutstanding"
+
+
+def _is_class_segment(ctx) -> bool:
+    """True when the context's only dimensions are share-class members."""
+    if ctx.find(f"{XBRLI}scenario") is not None:
+        return False
+    segment = ctx.find(f"{XBRLI}entity/{XBRLI}segment")
+    if segment is None or len(segment) == 0:
+        return False
+    return all(m.tag == "{http://xbrl.org/2006/xbrldi}explicitMember"
+               and (m.get("dimension") or "").split(":")[-1] == _CLASS_AXIS for m in segment)
+
+
 def parse_instance(xml: bytes, *, cik: int, accession: str, form: str, filed: str) -> list[tuple]:
     root = ET.fromstring(xml)
-    contexts: dict[str, tuple[str, str]] = {}
+    contexts: dict[str, tuple[str, str, bool]] = {}  # id -> (start, end, is_class_member)
     for ctx in root.iter(f"{XBRLI}context"):
-        if ctx.find(f"{XBRLI}entity/{XBRLI}segment") is not None or ctx.find(f"{XBRLI}scenario") is not None:
+        has_dims = (ctx.find(f"{XBRLI}entity/{XBRLI}segment") is not None
+                    or ctx.find(f"{XBRLI}scenario") is not None)
+        is_class = has_dims and _is_class_segment(ctx)
+        if has_dims and not is_class:
             continue
         period = ctx.find(f"{XBRLI}period")
-        instant = period.findtext(f"{XBRLI}instant")
+        if period is None:
+            continue
+        instant = (period.findtext(f"{XBRLI}instant") or "").strip()
+        start = (period.findtext(f"{XBRLI}startDate") or "").strip()
+        end = (period.findtext(f"{XBRLI}endDate") or "").strip()
         if instant:
-            contexts[ctx.get("id")] = ("", instant.strip())
-        else:
-            contexts[ctx.get("id")] = (period.findtext(f"{XBRLI}startDate").strip(),
-                                       period.findtext(f"{XBRLI}endDate").strip())
+            contexts[ctx.get("id")] = ("", instant, is_class)
+        elif start and end:
+            contexts[ctx.get("id")] = (start, end, is_class)
+        # else: forever or malformed period, skip
     units: dict[str, str] = {}
     for unit in root.iter(f"{XBRLI}unit"):
-        measures = [m.text.strip().split(":")[-1] for m in unit.iter(f"{XBRLI}measure")]
-        units[unit.get("id")] = "/".join(measures)  # USD, shares, or USD/shares
+        measures = [(m.text or "").strip().split(":")[-1] for m in unit.iter(f"{XBRLI}measure")]
+        units[unit.get("id")] = "/".join(m for m in measures if m)  # USD, shares, USD/shares
 
-    rows, seen = [], set()
+    rows, class_rows, seen = [], [], set()
     for el in root:
         if not el.tag.startswith("{"):
             continue
@@ -74,31 +98,53 @@ def parse_instance(xml: bytes, *, cik: int, accession: str, form: str, filed: st
         ctx = contexts.get(el.get("contextRef"))
         if concept is None or ctx is None or units.get(el.get("unitRef")) != concept.unit:
             continue
-        start, end = ctx
+        start, end, is_class = ctx
+        tag = f"{prefix}:{local}"
+        if is_class and tag != _SHARES_TAG:
+            continue
         text = (el.text or "").strip()
         if (concept.kind == "duration") != bool(start) or el.get(XSI_NIL) == "true" or not text:
             continue
-        key = (concept.name, f"{prefix}:{local}", start, end)
-        if key in seen:
-            continue
-        seen.add(key)
         try:
             value = float(text)
         except ValueError:
             continue
-        rows.append((cik, concept.name, f"{prefix}:{local}", concept.unit, start, end, value,
-                     filed, form, accession, "instance"))
+        if not math.isfinite(value):
+            continue
+        row = (cik, concept.name, tag, concept.unit, start, end, value, filed, form, accession,
+               "instance")
+        if is_class:
+            class_rows.append(row)
+            continue
+        key = (concept.name, tag, start, end)
+        if key in seen:
+            continue
+        seen.add(key)
+        rows.append(row)
+    # Per-class cover-page counts: a plain total for the same end wins, else sum the classes.
+    totals = {(r[2], r[4], r[5]) for r in rows}
+    class_rows = [r for r in class_rows if (r[2], r[4], r[5]) not in totals]
+    rows.extend(_sum_share_classes(class_rows))
     return rows
+
+
+def _validate_index(body: bytes) -> None:
+    try:
+        index = json.loads(body)
+        name = find_instance_name(index)
+    except (ValueError, KeyError, TypeError, AttributeError) as e:
+        raise ValueError(f"unusable filing index: {e}") from e
+    if name is None:
+        raise ValueError("instance document not listed yet")
 
 
 def fetch_instance_facts(sec: HttpClient, cik: int, accession: str, form: str,
                          filed: str) -> list[tuple]:
     acc = accession.replace("-", "")
-    index = sec.get_json(FILING_INDEX_URL.format(cik=cik, acc=acc),
-                         cache_key=f"sec/filings/{acc}/index.json")
+    index = json.loads(sec.get_bytes(FILING_INDEX_URL.format(cik=cik, acc=acc),
+                                     cache_key=f"sec/filings/{acc}/index.json",
+                                     validate=_validate_index))
     name = find_instance_name(index)
-    if name is None:
-        return []
     xml = sec.get_bytes(FILE_URL.format(cik=cik, acc=acc, name=name),
                         cache_key=f"sec/filings/{acc}/{name}", validate=_validate_xml)
     return parse_instance(xml, cik=cik, accession=accession, form=form, filed=filed)
@@ -117,7 +163,7 @@ def apply_instance_fallback(conn, sec: HttpClient, cik: int, today: date,
     for accession, form, filed in pending:
         try:
             rows = fetch_instance_facts(sec, cik, accession, form, filed)
-        except (FetchError, NotFound, ValueError, KeyError, AttributeError) as e:
+        except (FetchError, NotFound, ValueError) as e:
             log.warning("instance fallback failed for %s: %s", accession, e)
             continue
         if rows:
