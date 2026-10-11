@@ -422,8 +422,8 @@ def test_fallback_disagreeing_with_a_later_comparative_is_dropped_for_the_compan
 
 
 def test_a_breakdown_next_to_the_total_in_one_filing_does_not_reject_the_fallback():
-    # KO: goods net was the whole of revenue until 2018, when the 10-Q started reporting it as a
-    # breakdown line next to the new total tag.
+    # Goods net was the whole of revenue here until a 10-Q started reporting it as a breakdown
+    # line next to the new total tag.
     cf = {"facts": {"us-gaap": {
         "SalesRevenueGoodsNet": usd(
             fact("2017-01-01", "2017-12-31", 35410, "2018-02-23", "k17", form="10-K"),
@@ -435,6 +435,24 @@ def test_a_breakdown_next_to_the_total_in_one_filing_does_not_reject_the_fallbac
     rows = _rows(cf, 21344, "revenue")
     assert [(r[1], r[3], r[4]) for r in rows if r[0] == "us-gaap:SalesRevenueGoodsNet"] == [
         ("2017-01-01", 35410.0, "k17")]
+
+
+def test_a_few_disagreeing_fallback_periods_are_dropped_and_the_rest_kept():
+    # KO again, but the 2018 10-Q tagged its total with a company extension: the breakdown stands
+    # alone in that filing and only a later comparative shows it is not the total.
+    years = [(f"{y}-01-01", f"{y}-12-31", 30000 + y, f"{y + 1}-02-20", f"k{y}") for y in
+             range(2009, 2017)]
+    cf = {"facts": {"us-gaap": {
+        "SalesRevenueGoodsNet": usd(
+            *(fact(a, b, v, f, n, form="10-K") for a, b, v, f, n in years),
+            fact("2018-01-01", "2018-06-29", 16553, "2018-07-26", "q18")),
+        "Revenues": usd(
+            *(fact(a, b, v, "2017-02-20", "k16x", form="10-K") for a, b, v, _, _ in years[-5:]),
+            fact("2018-01-01", "2018-06-29", 17719, "2019-07-26", "q19")),
+    }}}
+    goods = [r for r in _rows(cf, 21344, "revenue") if r[0] == "us-gaap:SalesRevenueGoodsNet"]
+    assert len(goods) == 8
+    assert "q18" not in {r[4] for r in goods}
 
 
 def test_capex_fallback_sums_the_property_lines_of_a_filing():

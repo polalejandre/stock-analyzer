@@ -13,6 +13,7 @@ log = logging.getLogger(__name__)
 
 COMPANYFACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik:010d}.json"
 FALLBACK_TOLERANCE = 0.005  # a fallback sum within 0.5% (plus $1 rounding) of the total agrees
+FALLBACK_MIN_AGREEMENT = 0.8  # share of checked fallback sums that must agree to use any
 FACT_COLUMNS = ["cik", "concept", "tag", "unit", "period_start", "period_end", "value", "filed",
                 "form", "accession", "source"]
 
@@ -68,10 +69,14 @@ def _agrees(value: float, totals: set[float]) -> bool:
 
 
 def _fallback_rows(facts: dict, concept: Concept, cik: int, primary: list[tuple]) -> list[tuple]:
-    """One summed row per (period, filing) with fallback tags and no primary tag; none at all if
-    any such sum disagrees with a primary value of the same period from another filing (usually
-    a later report's comparative). Fallback lines next to the total in the same filing are a
-    breakdown of it and are neither used nor compared."""
+    """One summed row per (period, filing) with fallback tags and no primary tag.
+
+    Each sum that has a primary value for its period from another filing (usually a later
+    report's comparative) is checked against it. Unless FALLBACK_MIN_AGREEMENT of the checked
+    sums agree, the lines are only part of the total for this company and no fallback row is
+    kept; otherwise only the disagreeing ones are dropped. Fallback lines next to the total in
+    the same filing are a breakdown of it and are neither used nor checked.
+    """
     groups: dict[tuple, dict[str, tuple]] = {}
     for qualified in concept.fallback_tags:
         for r in _tag_rows(facts, concept, qualified, cik):
@@ -80,19 +85,24 @@ def _fallback_rows(facts: dict, concept: Concept, cik: int, primary: list[tuple]
     for r in primary:
         totals.setdefault((r[4], r[5]), set()).add(r[6])
     covered = {(r[4], r[5], r[9]) for r in primary}
-    out = []
+    out, checked, disagreed = [], 0, 0
     for key, parts in groups.items():
         if key in covered:
             continue
         start, end, _accn = key
         first = next(iter(parts.values()))
         value = sum(r[6] for r in parts.values())
-        if (start, end) in totals and not _agrees(value, totals[(start, end)]):
-            log.debug("CIK %d: %s fallback %s disagrees with its total for %s..%s; not used",
-                      cik, concept.name, "+".join(parts), start, end)
-            return []
+        if (start, end) in totals:
+            checked += 1
+            if not _agrees(value, totals[(start, end)]):
+                disagreed += 1
+                continue
         out.append((*first[:2], "+".join(parts), *first[3:6], value,
                     max(r[7] for r in parts.values()), *first[8:]))
+    if checked and (checked - disagreed) / checked < FALLBACK_MIN_AGREEMENT:
+        log.debug("CIK %d: %s fallback agrees on %d of %d periods; not used",
+                  cik, concept.name, checked - disagreed, checked)
+        return []
     return out
 
 
