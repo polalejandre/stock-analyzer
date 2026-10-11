@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from datetime import timedelta
 
+from analyzer.data.edgar import tags
 from analyzer.data.edgar.tags import CONCEPTS, PERIODIC_FORMS, Concept
 from analyzer.data.http import HttpClient, NotFound
 from analyzer.store.db import upsert_rows
@@ -12,8 +13,6 @@ from analyzer.store.db import upsert_rows
 log = logging.getLogger(__name__)
 
 COMPANYFACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik:010d}.json"
-FALLBACK_TOLERANCE = 0.005  # a fallback sum within 0.5% (plus $1 rounding) of the total agrees
-FALLBACK_MIN_AGREEMENT = 0.8  # share of checked fallback sums that must agree to use any
 FACT_COLUMNS = ["cik", "concept", "tag", "unit", "period_start", "period_end", "value", "filed",
                 "form", "accession", "source"]
 
@@ -65,14 +64,14 @@ def _tag_rows(facts: dict, concept: Concept, qualified: str, cik: int) -> list[t
 
 
 def _agrees(value: float, totals: set[float]) -> bool:
-    return any(abs(value - t) <= FALLBACK_TOLERANCE * abs(t) + 1 for t in totals)
+    return any(abs(value - t) <= tags.FALLBACK_TOLERANCE * abs(t) + 1 for t in totals)
 
 
 def _fallback_rows(facts: dict, concept: Concept, cik: int, primary: list[tuple]) -> list[tuple]:
     """One summed row per (period, filing) with fallback tags and no primary tag.
 
     Each sum that has a primary value for its period from another filing (usually a later
-    report's comparative) is checked against it. Unless FALLBACK_MIN_AGREEMENT of the checked
+    report's comparative) is checked against it. Unless tags.FALLBACK_MIN_AGREEMENT of the checked
     sums agree, the lines are only part of the total for this company and no fallback row is
     kept; otherwise only the disagreeing ones are dropped. Fallback lines next to the total in
     the same filing are a breakdown of it and are neither used nor checked.
@@ -99,7 +98,7 @@ def _fallback_rows(facts: dict, concept: Concept, cik: int, primary: list[tuple]
                 continue
         out.append((*first[:2], "+".join(parts), *first[3:6], value,
                     max(r[7] for r in parts.values()), *first[8:]))
-    if checked and (checked - disagreed) / checked < FALLBACK_MIN_AGREEMENT:
+    if checked and (checked - disagreed) / checked < tags.FALLBACK_MIN_AGREEMENT:
         log.debug("CIK %d: %s fallback agrees on %d of %d periods; not used",
                   cik, concept.name, checked - disagreed, checked)
         return []

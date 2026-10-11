@@ -106,3 +106,21 @@ def test_reextract_is_repeated_next_run_when_a_fetch_fails(tmp_path):
     migrate(conn)
     assert reextract_facts_if_tags_changed(conn, client, [320193]) == 0
     assert conn.execute("SELECT COUNT(*) FROM sync_state").fetchone() == (0,)
+
+
+def test_reextract_survives_a_company_whose_facts_cannot_be_read(tmp_path, monkeypatch):
+    from analyzer.data.edgar import sync
+
+    client, _ = fake_client(tmp_path, handler=lambda url, params: FakeResponse(json_data=CF))
+    conn = connect(tmp_path / "t.db")
+    migrate(conn)
+    real = sync.extract_facts
+
+    def flaky(cf, cik):
+        if cik == 1:
+            raise KeyError("end")
+        return real(cf, cik)
+
+    monkeypatch.setattr(sync, "extract_facts", flaky)
+    assert reextract_facts_if_tags_changed(conn, client, [1, 320193]) == 1
+    assert conn.execute("SELECT COUNT(*) FROM sync_state").fetchone() == (0,)  # retried next run

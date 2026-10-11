@@ -13,7 +13,7 @@ from analyzer.data.edgar.companyfacts import (
     replace_company_facts,
 )
 from analyzer.data.edgar.tags import TAG_MAP_FINGERPRINT
-from analyzer.data.http import FetchError, HttpClient
+from analyzer.data.http import HttpClient
 from analyzer.store.db import get_state, set_state
 
 log = logging.getLogger(__name__)
@@ -45,13 +45,12 @@ def reextract_facts_if_tags_changed(conn, sec: HttpClient, ciks: Iterable[int]) 
     for cik in ciks:
         try:
             cf = fetch_companyfacts(sec, cik, max_age=None)
-        except FetchError as exc:  # the whole pass is repeated next run
-            log.warning("re-extracting facts for CIK %d failed: %s", cik, exc)
+            if cf:
+                replace_company_facts(conn, cik, extract_facts(cf, cik))
+                done += 1
+        except Exception:  # one unreadable company must not block the step; repeated next run
+            log.exception("re-extracting facts for CIK %d failed", cik)
             failed += 1
-            continue
-        if cf:
-            replace_company_facts(conn, cik, extract_facts(cf, cik))
-            done += 1
     if not failed:
         set_state(conn, TAG_MAP_KEY, TAG_MAP_FINGERPRINT)
     return done

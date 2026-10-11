@@ -479,3 +479,24 @@ def test_default_merge_file_names_each_ticker_once():
     tm = pd.DataFrame({"cik": [1652044, 1652044], "ticker": ["GOOGL", "GOOG"],
                        "name": ["", ""], "exchange": ["", ""]})
     assert load_cik_merges(tm) == {1652044: [1288776]}
+
+
+def test_fallback_thresholds_are_part_of_the_tag_map_fingerprint(monkeypatch):
+    from analyzer.data.edgar import tags
+    before = tags.TAG_MAP_FINGERPRINT
+    monkeypatch.setattr(tags, "FALLBACK_MIN_AGREEMENT", 0.5)
+    assert tags.tag_map_fingerprint() != before
+
+
+def test_all_versions_keeps_a_predecessor_first_report_over_a_late_successor_comparative(tmp_path):
+    c = connect(tmp_path / "t.db")
+    migrate(c)
+    store_facts(c, extract_facts({"cik": 1288776, "facts": {"us-gaap": {"Revenues": usd(
+        fact("2014-01-01", "2014-12-31", 66001, "2015-02-06", "g14", form="10-K"))}}}, 1288776))
+    store_facts(c, extract_facts({"cik": 1652044, "facts": {"us-gaap": {"Revenues": usd(
+        fact("2014-01-01", "2014-12-31", 66001, "2016-02-11", "a15", form="10-K"),  # comparative
+        fact("2015-01-01", "2015-12-31", 74989, "2016-02-11", "a15", form="10-K"))}}}, 1652044))
+    rev = load_concept(c, 1652044, "revenue", merges={1652044: [1288776]}, all_versions=True)
+    # both survive, so the quarter builder can pick the on-time first report
+    assert rev[rev["period_end"] == "2014-12-31"]["accession"].tolist() == ["g14", "a15"]
+    assert rev[rev["period_end"] == "2015-12-31"]["accession"].tolist() == ["a15"]

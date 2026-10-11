@@ -70,7 +70,15 @@ CONCEPTS: tuple[Concept, ...] = (
 CONCEPT_BY_NAME = {c.name: c for c in CONCEPTS}
 # Bump when companyfacts.extract_facts changes how it reads the tags (e.g. the fallback rule).
 EXTRACTION_RULES = 4
-# Changes with any concept, tag, fallback or extraction rule; stored facts are then re-extracted.
-TAG_MAP_FINGERPRINT = hashlib.sha256(
-    f"{EXTRACTION_RULES}:{CONCEPTS!r}".encode()).hexdigest()[:16]
+FALLBACK_TOLERANCE = 0.005  # a fallback sum within 0.5% (plus $1 rounding) of the total agrees
+FALLBACK_MIN_AGREEMENT = 0.8  # share of checked fallback sums that must agree to use any
+
+
+def tag_map_fingerprint() -> str:
+    """Changes with any concept, tag, fallback, threshold or extraction rule."""
+    key = f"{EXTRACTION_RULES}:{FALLBACK_TOLERANCE}:{FALLBACK_MIN_AGREEMENT}:{CONCEPTS!r}"
+    return hashlib.sha256(key.encode()).hexdigest()[:16]
+
+
+TAG_MAP_FINGERPRINT = tag_map_fingerprint()  # stored facts are re-extracted when it changes
 CONCEPT_BY_TAG = {tag: c for c in CONCEPTS for tag in c.tags}

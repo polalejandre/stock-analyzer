@@ -98,3 +98,10 @@ def test_wikipedia_contact_placeholder_is_rejected(tmp_path):
             root=tmp_path,
             environ={"SEC_USER_AGENT": "a a@test.invalid", "WIKIPEDIA_CONTACT": "you@example.com"},
         )
+
+
+@pytest.mark.parametrize("contact", ["a@b.c\nX-Evil: y", "two words@b.c", "a@b c.d"])
+def test_wikipedia_contact_with_whitespace_is_rejected(tmp_path, contact):
+    with pytest.raises(ConfigError, match="WIKIPEDIA_CONTACT"):
+        load_settings(root=tmp_path,
+                      environ={"SEC_USER_AGENT": "a a@test.invalid", "WIKIPEDIA_CONTACT": contact})

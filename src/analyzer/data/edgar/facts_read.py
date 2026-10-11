@@ -7,7 +7,7 @@ from datetime import date
 
 import pandas as pd
 
-from analyzer.data.edgar.quarters import discrete_quarters
+from analyzer.data.edgar.quarters import FIRST_REPORT_DAYS, discrete_quarters
 from analyzer.data.edgar.tags import CONCEPT_BY_NAME
 
 _OUT = ["cik", "tag", "period_start", "period_end", "value", "filed", "accession"]
@@ -56,8 +56,13 @@ def load_concept(
     df = df.sort_values(["period_start", "period_end", "foreign", "prio", "filed", "accession"],
                         ascending=[True, True, True, True, False, False])
     if all_versions:
-        own = df.groupby(["period_start", "period_end"])["foreign"].transform("min")
-        df = df[df["foreign"] == own].drop_duplicates(
+        # A predecessor's version is dropped only where the current CIK reported the period on
+        # time; a successor's late comparative must not hide the predecessor's first report.
+        on_time = (pd.to_datetime(df["filed"]) - pd.to_datetime(df["period_end"])).dt.days \
+            <= FIRST_REPORT_DAYS
+        df["own_on_time"] = (df["foreign"] == 0) & on_time
+        own = df.groupby(["period_start", "period_end"])["own_on_time"].transform("any")
+        df = df[(df["foreign"] == 0) | ~own].drop_duplicates(
             ["period_start", "period_end", "accession"], keep="first")
     else:
         df = df.drop_duplicates(["period_start", "period_end"], keep="first")

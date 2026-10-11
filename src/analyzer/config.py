@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -11,6 +12,7 @@ from pathlib import Path
 from dotenv import dotenv_values
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+EMAIL = re.compile(r"[^\s@]+@[^\s@]+")  # no whitespace: the value goes into an HTTP header
 PLACEHOLDER_DOMAIN = "example.com"  # the .env.example address; SEC may block it
 
 
@@ -50,7 +52,7 @@ def load_settings(root: Path = PROJECT_ROOT, environ: Mapping[str, str] | None =
         )
     wikipedia_contact = (env.get("WIKIPEDIA_CONTACT") or "").strip() or None
     if wikipedia_contact is not None and (
-        "@" not in wikipedia_contact or PLACEHOLDER_DOMAIN in wikipedia_contact.lower()
+        not EMAIL.fullmatch(wikipedia_contact) or PLACEHOLDER_DOMAIN in wikipedia_contact.lower()
     ):
         raise ConfigError(
             "WIKIPEDIA_CONTACT must be a real contact email, or left unset. See .env.example."
