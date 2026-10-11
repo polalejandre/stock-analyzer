@@ -2,11 +2,23 @@
 
 from __future__ import annotations
 
+import logging
+from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
 
 from analyzer.data.edgar.companies import fetch_submissions, store_submissions
-from analyzer.data.edgar.companyfacts import extract_facts, fetch_companyfacts, store_facts
-from analyzer.data.http import HttpClient
+from analyzer.data.edgar.companyfacts import (
+    extract_facts,
+    fetch_companyfacts,
+    replace_company_facts,
+)
+from analyzer.data.edgar.tags import TAG_MAP_FINGERPRINT
+from analyzer.data.http import FetchError, HttpClient
+from analyzer.store.db import get_state, set_state
+
+log = logging.getLogger(__name__)
+
+TAG_MAP_KEY = "facts_tag_map"  # sync_state: fingerprint of the tag map the stored facts follow
 
 
 def refresh_company(conn, sec: HttpClient, cik: int, *, max_age: timedelta | None,
@@ -21,4 +33,25 @@ def refresh_company(conn, sec: HttpClient, cik: int, *, max_age: timedelta | Non
     if facts:
         cf = fetch_companyfacts(sec, cik, max_age=max_age)
         if cf:
-            store_facts(conn, extract_facts(cf, cik))
+            replace_company_facts(conn, cik, extract_facts(cf, cik))
+
+
+def reextract_facts_if_tags_changed(conn, sec: HttpClient, ciks: Iterable[int]) -> int:
+    """After a change to the tag map, extract every company's facts again from its cached
+    companyfacts (fetched only when not cached). Returns how many companies were re-extracted."""
+    if get_state(conn, TAG_MAP_KEY) == TAG_MAP_FINGERPRINT:
+        return 0
+    done, failed = 0, 0
+    for cik in ciks:
+        try:
+            cf = fetch_companyfacts(sec, cik, max_age=None)
+        except FetchError as exc:  # the whole pass is repeated next run
+            log.warning("re-extracting facts for CIK %d failed: %s", cik, exc)
+            failed += 1
+            continue
+        if cf:
+            replace_company_facts(conn, cik, extract_facts(cf, cik))
+            done += 1
+    if not failed:
+        set_state(conn, TAG_MAP_KEY, TAG_MAP_FINGERPRINT)
+    return done

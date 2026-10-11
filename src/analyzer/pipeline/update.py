@@ -17,7 +17,7 @@ from analyzer.data.edgar.daily_index import scan_daily_indexes
 from analyzer.data.edgar.insider_bulk import sync_insider
 from analyzer.data.edgar.instance import apply_instance_fallback
 from analyzer.data.edgar.merges import load_cik_merges
-from analyzer.data.edgar.sync import refresh_company
+from analyzer.data.edgar.sync import reextract_facts_if_tags_changed, refresh_company
 from analyzer.data.edgar.tags import PERIODIC_FORMS
 from analyzer.data.fred import MACRO_SERIES, sync_macro
 from analyzer.data.http import FetchError
@@ -213,6 +213,9 @@ def step_edgar(ctx: UpdateContext) -> StepResult:
         _save_retry(ctx.conn, owed)
     owed_at_start = set(owed)
 
+    # A changed tag map applies to the stored companies too (from cache, so this is cheap).
+    reextracted = reextract_facts_if_tags_changed(ctx.conn, sec, sorted(known))
+
     backfill = sorted((tracked | predecessors) - known)  # first time seen: full backfill
     for cik in backfill:
         res.attempted += 1
@@ -282,7 +285,8 @@ def step_edgar(ctx: UpdateContext) -> StepResult:
         res.failed.append(("latest-date", _err(exc)))
         res.phase_failed = True
     res.detail = (f"companies={len(tracked)} changed={len(changed)} retried={len(retry_now)} "
-                  f"insider_quarters={quarters} form4_xml={xml_filings}")
+                  f"insider_quarters={quarters} form4_xml={xml_filings} "
+                  f"reextracted={reextracted}")
     return res
 
 

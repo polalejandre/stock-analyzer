@@ -271,7 +271,12 @@ class EdgarWorld:
         self.scanned: list[set[int]] = []
         self.instance: list[int] = []
         self.insider: list[set[int]] = []
+        self.reextracted: list[list[int]] = []
         self.ticker_refreshes = 0
+
+    def reextract(self, conn, sec, ciks):
+        self.reextracted.append(list(ciks))
+        return len(self.reextracted[-1])
 
     def retry_state(self):
         """The persisted {cik: consecutive failures}, or None before anything was written."""
@@ -325,6 +330,7 @@ def world(ctx, monkeypatch):
     monkeypatch.setattr(update, "apply_instance_fallback", w.instance_fallback)
     monkeypatch.setattr(update, "sync_insider", w.sync_insider)
     monkeypatch.setattr(update, "refresh_tickers", w.refresh_tickers)
+    monkeypatch.setattr(update, "reextract_facts_if_tags_changed", w.reextract)
     return w
 
 
@@ -353,6 +359,14 @@ def test_edgar_backfills_new_companies_then_refreshes_changed_ones(ctx, world):
     assert world.insider == [{1, 2}]
     assert world.ticker_refreshes == 1
     assert result.failed == []
+
+
+def test_edgar_reextracts_stored_companies_before_new_ones_are_backfilled(ctx, world):
+    add_company(ctx.conn, "AAA", 1)
+    add_company(ctx.conn, "BBB", 2, known=False)
+    result = step_edgar(ctx)
+    assert world.reextracted == [[1]]  # BBB is backfilled with the current tag map anyway
+    assert "reextracted=1" in result.detail
 
 
 def test_edgar_refreshes_facts_when_a_periodic_form_was_filed(ctx, world):

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from typing import Literal
 
@@ -14,6 +15,10 @@ class Concept:
     kind: Literal["duration", "instant"]
     unit: str
     tags: tuple[str, ...]
+    # Partial lines that some companies report instead of a total: summed per filing when that
+    # filing has none of `tags` for the period, and dropped for a company whose sums disagree
+    # with its own total on any period both cover (see companyfacts.extract_facts).
+    fallback_tags: tuple[str, ...] = ()
 
 
 def _g(*names: str) -> tuple[str, ...]:
@@ -24,7 +29,8 @@ CONCEPTS: tuple[Concept, ...] = (
     Concept("revenue", "duration", "USD", _g(
         "Revenues", "RevenueFromContractWithCustomerExcludingAssessedTax", "SalesRevenueNet",
         "RevenuesNetOfInterestExpense", "RegulatedAndUnregulatedOperatingRevenue",
-        "RevenueFromContractWithCustomerIncludingAssessedTax")),
+        "RevenueFromContractWithCustomerIncludingAssessedTax"),
+        fallback_tags=_g("SalesRevenueGoodsNet", "SalesRevenueServicesNet")),
     Concept("cost_of_revenue", "duration", "USD", _g(
         "CostOfRevenue", "CostOfGoodsAndServicesSold", "CostOfGoodsSold")),
     Concept("gross_profit", "duration", "USD", _g("GrossProfit")),
@@ -36,7 +42,12 @@ CONCEPTS: tuple[Concept, ...] = (
         "NetCashProvidedByUsedInOperatingActivities",
         "NetCashProvidedByUsedInOperatingActivitiesContinuingOperations")),
     Concept("capex", "duration", "USD", _g(
-        "PaymentsToAcquirePropertyPlantAndEquipment", "PaymentsToAcquireProductiveAssets")),
+        "PaymentsToAcquirePropertyPlantAndEquipment", "PaymentsToAcquireProductiveAssets"),
+        fallback_tags=_g(
+            "PaymentsToAcquireOtherPropertyPlantAndEquipment", "PaymentsToAcquireOtherProductiveAssets",
+            "PaymentsForCapitalImprovements", "PaymentsToDevelopRealEstateAssets",
+            "PaymentsToExploreAndDevelopOilAndGasProperties",
+            "PaymentsToAcquireOilAndGasPropertyAndEquipment", "PaymentsForConstructionInProcess")),
     Concept("depreciation_amortization", "duration", "USD", _g(
         "DepreciationDepletionAndAmortization", "DepreciationAndAmortization",
         "DepreciationAmortizationAndAccretionNet", "Depreciation")),
@@ -57,4 +68,9 @@ CONCEPTS: tuple[Concept, ...] = (
 )
 
 CONCEPT_BY_NAME = {c.name: c for c in CONCEPTS}
+# Bump when companyfacts.extract_facts changes how it reads the tags (e.g. the fallback rule).
+EXTRACTION_RULES = 2
+# Changes with any concept, tag, fallback or extraction rule; stored facts are then re-extracted.
+TAG_MAP_FINGERPRINT = hashlib.sha256(
+    f"{EXTRACTION_RULES}:{CONCEPTS!r}".encode()).hexdigest()[:16]
 CONCEPT_BY_TAG = {tag: c for c in CONCEPTS for tag in c.tags}

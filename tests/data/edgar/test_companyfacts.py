@@ -370,3 +370,63 @@ def test_load_quarters_does_not_difference_a_recast_annual_value(tmp_path):
     q = load_quarters(c, 10456, "capex")
     assert q["value"].tolist() == [176]
     assert load_quarters(c, 10456, "capex", as_of=date(2024, 1, 1)).empty
+
+
+def _rows(cf, cik, concept):
+    return sorted((r[2], r[4], r[5], r[6], r[9]) for r in extract_facts(cf, cik) if r[1] == concept)
+
+
+def test_fallback_tags_are_summed_when_a_filing_has_no_total():
+    cf = {"facts": {"us-gaap": {
+        "SalesRevenueGoodsNet": usd(fact("2016-01-01", "2016-03-31", 70, "2016-05-01", "q1")),
+        "SalesRevenueServicesNet": usd(fact("2016-01-01", "2016-03-31", 30, "2016-05-01", "q1")),
+    }}}
+    assert _rows(cf, 7, "revenue") == [
+        ("us-gaap:SalesRevenueGoodsNet+us-gaap:SalesRevenueServicesNet",
+         "2016-01-01", "2016-03-31", 100.0, "q1")]
+
+
+def test_fallback_tags_are_not_used_in_a_filing_that_reports_the_total():
+    cf = {"facts": {"us-gaap": {
+        "Revenues": usd(fact("2018-01-01", "2018-03-31", 120, "2018-05-01", "q2")),
+        "SalesRevenueGoodsNet": usd(fact("2018-01-01", "2018-03-31", 80, "2018-05-01", "q2")),
+    }}}
+    assert _rows(cf, 7, "revenue") == [("us-gaap:Revenues", "2018-01-01", "2018-03-31", 120.0, "q2")]
+
+
+def test_fallback_agreeing_with_the_total_on_overlapping_periods_is_kept():
+    # STZ-style: net sales tagged as goods until ASC 606; the first new-tag 10-K repeats old years.
+    cf = {"facts": {"us-gaap": {
+        "SalesRevenueGoodsNet": usd(
+            fact("2015-03-01", "2016-02-29", 6548, "2016-04-25", "k16", form="10-K"),
+            fact("2016-03-01", "2017-02-28", 7331, "2017-04-25", "k17", form="10-K")),
+        "RevenueFromContractWithCustomerExcludingAssessedTax": usd(
+            fact("2016-03-01", "2017-02-28", 7331, "2019-04-23", "k19", form="10-K"),
+            fact("2018-03-01", "2019-02-28", 8116, "2019-04-23", "k19", form="10-K")),
+    }}}
+    rows = _rows(cf, 16918, "revenue")
+    assert [(r[1], r[3], r[4]) for r in rows if r[0] == "us-gaap:SalesRevenueGoodsNet"] == [
+        ("2015-03-01", 6548.0, "k16"), ("2016-03-01", 7331.0, "k17")]
+
+
+def test_fallback_disagreeing_with_the_total_anywhere_is_dropped_for_the_company():
+    # Goods is only part of revenue here: it must not stand in for the total in other years.
+    cf = {"facts": {"us-gaap": {
+        "SalesRevenueGoodsNet": usd(
+            fact("2015-01-01", "2015-12-31", 119, "2016-02-20", "k15", form="10-K"),
+            fact("2016-01-01", "2016-12-31", 97, "2017-02-20", "k16", form="10-K")),
+        "Revenues": usd(fact("2016-01-01", "2016-12-31", 1397, "2017-02-20", "k16", form="10-K")),
+    }}}
+    assert [r[0] for r in _rows(cf, 3453, "revenue")] == ["us-gaap:Revenues"]
+
+
+def test_capex_fallback_sums_the_property_lines_of_a_filing():
+    cf = {"facts": {"us-gaap": {
+        "PaymentsToExploreAndDevelopOilAndGasProperties": usd(
+            fact("2025-01-01", "2025-03-31", 1500, "2025-05-01", "q1")),
+        "PaymentsToAcquireOtherPropertyPlantAndEquipment": usd(
+            fact("2025-01-01", "2025-03-31", 60, "2025-05-01", "q1")),
+        "PaymentsToAcquireRealEstate": usd(  # an acquisition, not capex
+            fact("2025-01-01", "2025-03-31", 999, "2025-05-01", "q1")),
+    }}}
+    assert [r[3] for r in _rows(cf, 821189, "capex")] == [1560.0]
