@@ -9,6 +9,10 @@ import pandas as pd
 QUARTER_DAYS = (77, 120)  # inclusive day count, 11–17 weeks: 12/13/14/16/17-week quarters
 START_DRIFT_DAYS = 3  # YTD facts whose start dates differ by at most this share one chain
 SAME_QUARTER_DAYS = 7  # quarter ends this close together are one quarter, not two
+# A version filed this long after its period end is a comparative in a later report, often recast
+# (discontinued operations). It is used only when no earlier version of the period exists, so a
+# recast annual value is never differenced against a year-to-date value that was not recast.
+FIRST_REPORT_DAYS = 366
 _DTYPES = {
     "period_start": "datetime64[ns]",
     "period_end": "datetime64[ns]",
@@ -63,10 +67,23 @@ def _frame(quarters: list[_Quarter]) -> pd.DataFrame:
     return out.sort_values("period_end").reset_index(drop=True)
 
 
+def _as_first_reported(d: pd.DataFrame) -> pd.DataFrame:
+    """One version per period: the latest filed within FIRST_REPORT_DAYS of the period end
+    (the first report and its amendments), else the earliest later one."""
+    late = (d["filed"] - d["period_end"]).dt.days > FIRST_REPORT_DAYS
+    filed = d["filed"].astype("int64")
+    order = filed.where(late, -filed)  # on time: newest first; late: oldest first
+    return (d.assign(_late=late, _order=order)
+            .sort_values(["_late", "_order"])
+            .drop_duplicates(["period_start", "period_end"])
+            .drop(columns=["_late", "_order"]))
+
+
 def discrete_quarters(df: pd.DataFrame, additive: bool = True) -> pd.DataFrame:
+    """Discrete quarters from facts that may hold several filed versions of one period."""
     if df.empty:
         return _frame([])
-    d = df.dropna(subset=["period_start"]).copy()
+    d = _as_first_reported(df.dropna(subset=["period_start"]))
     d["days"] = (d["period_end"] - d["period_start"]).dt.days + 1
     candidates: list[_Quarter] = []
     direct_ends = set()

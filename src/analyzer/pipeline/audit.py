@@ -8,8 +8,7 @@ from datetime import date, timedelta
 
 import pandas as pd
 
-from analyzer.data.edgar.facts_read import load_concept
-from analyzer.data.edgar.quarters import discrete_quarters
+from analyzer.data.edgar.facts_read import load_quarters
 
 STALE_PRICE_DAYS = 4
 FCF_WINDOW_DAYS = 470  # four quarters plus filing lag
@@ -37,7 +36,7 @@ class TickerAudit:
 
 
 def _quarters(conn, cik, concept, merges) -> pd.DataFrame:
-    return discrete_quarters(load_concept(conn, cik, concept, merges=merges))
+    return load_quarters(conn, cik, concept, merges=merges)
 
 
 def _recent_count(q: pd.DataFrame, today: date) -> int:

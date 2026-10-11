@@ -4,7 +4,7 @@ import pandas as pd
 import pytest
 
 from analyzer.data.edgar.companyfacts import extract_facts, fetch_companyfacts, store_facts
-from analyzer.data.edgar.facts_read import latest_shares, load_concept
+from analyzer.data.edgar.facts_read import latest_shares, load_concept, load_quarters
 from analyzer.data.edgar.merges import load_cik_merges
 from analyzer.data.price_sync import read_prices, write_prices
 from analyzer.store.db import connect, migrate
@@ -323,3 +323,50 @@ def test_merge_asof_joins_stored_prices_with_facts_known_on_each_day(conn):
     joined = pd.merge_asof(prices, assets, left_on="date", right_on="filed")
     # total assets filed on 2023-08-25 are unknown on the two days before it
     assert joined["value"].fillna(0).tolist() == [0, 0, 5000, 5000, 5000]
+
+
+def test_all_versions_keeps_every_filing_of_a_period(conn):
+    rev = load_concept(conn, 1045810, "revenue", all_versions=True)
+    assert rev["value"].tolist() == [1000, 1050]
+    assert rev["accession"].tolist() == ["a1", "c1"]
+    capex = load_concept(conn, 1045810, "capex", all_versions=True)
+    assert capex["value"].tolist() == [100, 110, 111, 200]  # one version per accession
+
+
+def test_all_versions_keeps_the_priority_tag_within_one_filing(tmp_path):
+    c = connect(tmp_path / "t.db")
+    migrate(c)
+    store_facts(c, extract_facts({"cik": 7, "facts": {"us-gaap": {
+        "Revenues": usd(fact("2024-01-01", "2024-03-31", 10, "2024-05-01", "x1")),
+        "SalesRevenueNet": usd(fact("2024-01-01", "2024-03-31", 9, "2024-05-01", "x1")),
+    }}}, 7))
+    rev = load_concept(c, 7, "revenue", all_versions=True)
+    assert rev["value"].tolist() == [10]
+    assert rev["tag"].tolist() == ["us-gaap:Revenues"]
+
+
+def test_all_versions_drops_predecessor_periods_the_current_cik_reports(conn):
+    old = {"cik": 34088, "facts": {"us-gaap": {"Revenues": usd(
+        fact("2010-01-01", "2010-03-31", 500, "2010-05-01", "o1"),
+        fact("2022-01-31", "2022-05-01", 7777, "2022-05-20", "o2"),
+    )}}}
+    store_facts(conn, extract_facts(old, 34088))
+    rev = load_concept(conn, 1045810, "revenue", merges={1045810: [34088]}, all_versions=True)
+    assert rev["value"].tolist() == [500, 1000, 1050]
+    early = load_concept(conn, 1045810, "revenue", as_of=date(2022, 5, 26),
+                         merges={1045810: [34088]}, all_versions=True)
+    assert early["value"].tolist() == [500, 7777]
+
+
+def test_load_quarters_does_not_difference_a_recast_annual_value(tmp_path):
+    c = connect(tmp_path / "t.db")
+    migrate(c)
+    store_facts(c, extract_facts({"cik": 10456, "facts": {"us-gaap": {
+        "PaymentsToAcquireProductiveAssets": usd(
+            fact("2023-01-01", "2023-09-30", 502, "2023-11-02", "q3"),
+            fact("2023-01-01", "2023-12-31", 678, "2024-02-09", "k23", form="10-K"),
+            fact("2023-01-01", "2023-12-31", 432, "2026-02-12", "k25", form="10-K"),
+        )}}}, 10456))
+    q = load_quarters(c, 10456, "capex")
+    assert q["value"].tolist() == [176]
+    assert load_quarters(c, 10456, "capex", as_of=date(2024, 1, 1)).empty

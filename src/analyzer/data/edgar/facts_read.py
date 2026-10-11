@@ -7,6 +7,7 @@ from datetime import date
 
 import pandas as pd
 
+from analyzer.data.edgar.quarters import discrete_quarters
 from analyzer.data.edgar.tags import CONCEPT_BY_NAME
 
 _OUT = ["cik", "tag", "period_start", "period_end", "value", "filed", "accession"]
@@ -28,9 +29,12 @@ def load_concept(
     concept: str,
     as_of: date | None = None,
     merges: Mapping[int, Sequence[int]] | None = None,
+    all_versions: bool = False,
 ) -> pd.DataFrame:
     """One value per period, as it was known on `as_of` (default: everything filed).
 
+    With `all_versions`, every filing's value of a period is kept (one per accession, its
+    highest-priority tag), for callers that choose between the first report and a restatement.
     Raises KeyError for a concept name that is not in the tag map.
     """
     if concept not in CONCEPT_BY_NAME:
@@ -51,11 +55,31 @@ def load_concept(
     # Latest filing wins; accession breaks same-day ties (a later accession is a later filing).
     df = df.sort_values(["period_start", "period_end", "foreign", "prio", "filed", "accession"],
                         ascending=[True, True, True, True, False, False])
-    df = df.drop_duplicates(["period_start", "period_end"], keep="first")
+    if all_versions:
+        own = df.groupby(["period_start", "period_end"])["foreign"].transform("min")
+        df = df[df["foreign"] == own].drop_duplicates(
+            ["period_start", "period_end", "accession"], keep="first")
+    else:
+        df = df.drop_duplicates(["period_start", "period_end"], keep="first")
     df["period_start"] = pd.to_datetime(df["period_start"].mask(df["period_start"] == "")).astype(_DT)
     df["period_end"] = pd.to_datetime(df["period_end"]).astype(_DT)
     df["filed"] = pd.to_datetime(df["filed"]).astype(_DT)
-    return df.sort_values(["period_end", "period_start"]).reset_index(drop=True)[_OUT]
+    return df.sort_values(["period_end", "period_start", "filed"]).reset_index(drop=True)[_OUT]
+
+
+def load_quarters(
+    conn,
+    cik: int,
+    concept: str,
+    as_of: date | None = None,
+    merges: Mapping[int, Sequence[int]] | None = None,
+    additive: bool = True,
+) -> pd.DataFrame:
+    """Discrete fiscal quarters of a duration concept, as known on `as_of`, built from every
+    filed version so that a later restatement is never mixed with an original value."""
+    return discrete_quarters(
+        load_concept(conn, cik, concept, as_of=as_of, merges=merges, all_versions=True),
+        additive=additive)
 
 
 def latest_shares_dated(conn, cik: int, as_of: date,

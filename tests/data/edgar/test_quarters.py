@@ -226,3 +226,43 @@ def test_two_fiscal_years_give_eight_quarters():
     assert q["value"].tolist() == [90, 100, 110, 120, 100, 150, 170, 180]
     assert q["derived"].tolist() == [False, True, True, True, False, True, True, True]
     assert q["period_end"].is_monotonic_increasing and q["period_end"].is_unique
+
+
+def test_later_restated_annual_is_not_mixed_with_original_nine_months():
+    # BAX: the FY2023 value was recast in a 2026 10-K; the 9-month value never was.
+    q = discrete_quarters(frame([
+        ("2023-01-01", "2023-09-30", 502, "2023-11-02"),
+        ("2023-01-01", "2023-12-31", 678, "2024-02-09"),   # as first reported
+        ("2023-01-01", "2023-12-31", 432, "2026-02-12"),   # recast comparative, years later
+    ]))
+    assert q["value"].tolist() == [176]
+    assert q["filed"].tolist() == [pd.Timestamp("2024-02-09")]
+
+
+def test_later_restated_direct_quarter_does_not_replace_the_first_report():
+    q = discrete_quarters(frame([
+        ("2023-01-01", "2023-03-31", 100, "2023-05-01"),
+        ("2023-01-01", "2023-03-31", 80, "2024-05-01"),    # recast comparative in the next year's Q1
+        ("2023-01-01", "2023-06-30", 250, "2023-08-01"),
+    ]))
+    assert q["value"].tolist() == [100, 150]
+    assert q["filed"].tolist() == [pd.Timestamp("2023-05-01"), pd.Timestamp("2023-08-01")]
+
+
+def test_amendment_within_a_year_of_period_end_wins():
+    q = discrete_quarters(frame([
+        ("2023-01-01", "2023-09-30", 420, "2023-11-01"),
+        ("2023-01-01", "2023-12-31", 600, "2024-02-15"),
+        ("2023-01-01", "2023-12-31", 610, "2024-06-01"),   # 10-K/A
+    ]))
+    assert q["value"].tolist() == [190]
+    assert q["filed"].tolist() == [pd.Timestamp("2024-06-01")]
+
+
+def test_period_known_only_from_a_late_filing_is_still_used():
+    q = discrete_quarters(frame([
+        ("2023-01-01", "2023-09-30", 420, "2025-11-01"),   # only a comparative exists
+        ("2023-01-01", "2023-12-31", 600, "2024-02-15"),
+    ]))
+    assert q["value"].tolist() == [180]
+    assert q["filed"].tolist() == [pd.Timestamp("2025-11-01")]
