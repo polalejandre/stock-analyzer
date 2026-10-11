@@ -430,3 +430,17 @@ def test_capex_fallback_sums_the_property_lines_of_a_filing():
             fact("2025-01-01", "2025-03-31", 999, "2025-05-01", "q1")),
     }}}
     assert [r[3] for r in _rows(cf, 821189, "capex")] == [1560.0]
+
+
+def test_default_merge_file_names_each_ticker_once():
+    import tomllib
+
+    from analyzer.data.edgar.merges import DEFAULT_PATH
+    entries = tomllib.loads(DEFAULT_PATH.read_text())["merge"]
+    tickers = [e["ticker"] for e in entries]
+    assert len(tickers) == len(set(tickers))
+    assert all(e["predecessor_ciks"] and all(isinstance(p, int) for p in e["predecessor_ciks"])
+               for e in entries)
+    tm = pd.DataFrame({"cik": [1652044, 1652044], "ticker": ["GOOGL", "GOOG"],
+                       "name": ["", ""], "exchange": ["", ""]})
+    assert load_cik_merges(tm) == {1652044: [1288776]}
