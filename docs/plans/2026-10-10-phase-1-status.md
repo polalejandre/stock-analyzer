@@ -96,6 +96,89 @@ Root causes of the 379 flags, from the stored facts and the cached companyfacts 
    - OZK, which files with the FDIC, not SEC.
    - Banks, which have no revenue line in the map.
 
+## Audit fixes (2026-10-11, owner chose "data-layer fixes now")
+
+Fixed in phase 1:
+
+- **Findings 1 and 2 (c30530e).**
+  - A concept can name fallback tags (partial lines).
+    - In a filing without any of the concept's tags for a period, its fallback tags are summed.
+    - A company whose fallback sum disagrees with its own total by more than 0.5%, on any
+      period, gets no fallback rows at all.
+  - Revenue fallbacks: SalesRevenueGoodsNet, SalesRevenueServicesNet.
+  - Capex fallbacks:
+    - other PP&E, other productive assets;
+    - REIT capital improvements and development;
+    - oil and gas development and property;
+    - construction in process.
+  - Not used:
+    - PaymentsToAcquireRealEstate (acquisitions, not capex);
+    - PaymentsForProceedsFromProductiveAssets (net of sale proceeds);
+    - PaymentsToDevelopSoftware (often reported next to an extension-tag PP&E line).
+  - A company's companyfacts rows are now replaced on refresh, not upserted.
+  - A tag-map fingerprint (`facts_tag_map` in sync_state) makes the EDGAR step re-extract every
+    stored company from cache after any tag-map or extraction-rule change. When the extraction
+    code changes, bump `EXTRACTION_RULES` in `tags.py`.
+- **Finding 3 (c0a8959).** 20 verified holding-company merges in `cik_merges.toml`.
+  - Each predecessor's name and its revenue on shared periods were checked against SEC.
+  - APO was rejected: only 7 of 16 periods agree.
+  - SW, TKO, FTI, BKR, DD and CRH were left out: their accounting predecessor files no XBRL.
+- **Finding 5 (4d72349).** Quarters are built from values as first reported.
+  - "First reported" means the latest version filed within 366 days of the period end, so
+    amendments are included.
+  - A later comparative is used only when no earlier version exists.
+  - `load_concept(all_versions=True)` returns every version; `load_quarters` wraps both.
+  - Known remaining case: BAX Q3 2015, the Baxalta spin-off quarter. There the company's own
+    year-to-date figures changed scope mid-year, so the derived quarter is negative.
+- **Finding 6 (1bf77b7).**
+  - `universe_on` excludes SIC 6221 (commodity and crypto trusts) next to blank checks (6770).
+  - The young screen skips a listing that is not its CIK's first ticker in SEC's map when that
+    first ticker is old (ETNs, further trust series, notes and new classes of old issuers).
+    It deletes a stored row for such a listing and remembers the "secondary" verdict for 180
+    days.
+
+- **Follow-up after the second update (c0a8959..0b9d3b1).**
+  - Fallback sums are checked only for filings without a total, against totals from other
+    filings. A breakdown line next to the total in the same filing is neither used nor checked.
+  - A company keeps its fallback rows when at least 80% of the checked sums agree; only the
+    disagreeing periods are dropped.
+  - The 80% bar is deliberate. Across all cached companies, 131 of 170 revenue and 47 of 117
+    capex fallback users agree on 90% or more of checked periods. The middle band stays rejected,
+    e.g. KO (75%) and GME (67%).
+- **Result.** After `analyzer update` and `analyzer update --step edgar` (logs
+  `update-2026-10-11b/c/d.log`), `analyzer audit` (`audit-2026-10-11d.log`) shows:
+
+  | Measure | Before fixes | After fixes |
+  |---|---|---|
+  | Active tickers | 1,117 | 1,110 |
+  | Flagged | 379 | 277 |
+  | No FCF | 174 | 128 |
+  | Check CIK merge | 140 | 71 |
+  | No fundamentals | 87 | 85 |
+  | Tickers with a recent FCF | 1,292 | 1,369 |
+
+  - Also on that run: Wikipedia returned no 429 with the contact email (0 of 3 fetches failed),
+    and 23 predecessor CIKs were backfilled. 893 young listings remain after 11 secondary ones
+    were removed.
+  - Live tests: 14 of 14 pass. Unit tests: 439 pass. Ruff is clean.
+
+Deferred to phase 2:
+
+- Finding 4: quarters missing from companyfacts. Covered by the existing prep item "build TTM
+  values from annual figures".
+- Finding 7:
+  - IFRS foreign filers (ifrs-full namespace);
+  - a bank revenue definition (net interest income plus noninterest income);
+  - mortgage REITs and BDCs.
+- Capex reported only under company extension tags: COP, PSX, NEE, URI, ABNB, DTE and about 30
+  more.
+- Revenue history before ASC 606 for companies whose fallback agreement is between 50% and 80%
+  (KO, GME and about 12 more): review them one by one, or use annual figures there.
+- Banks and other financials still show "check CIK merge" and "no fundamentals" (USB, WFC, COF,
+  KEY, FITB…): this waits for the bank revenue definition.
+- BAX Q3 2015: a negative derived quarter. The company's own year-to-date figures changed scope
+  mid-year at the Baxalta spin-off.
+
 ## Next steps (resume here)
 
 1. Resume the first update (planned for the morning of 2026-10-11):
