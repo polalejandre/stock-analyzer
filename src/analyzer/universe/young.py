@@ -22,7 +22,8 @@ _SUFFIX_DERIVATIVE = re.compile(r"-(P[A-Z]?|WS?|WT|U|UN|R|RT)$")  # preferreds, 
 SCREEN_WINDOW_DAYS = 45  # floor; longer liquidity windows widen it (see screen_window_days)
 CLIPPED_MARGIN = timedelta(days=30)
 VERDICTS_KEY = "young_screen_verdicts"  # sync_state: JSON {ticker: {"verdict", "on"}}
-VERDICT_RECHECK_DAYS = 180  # an "old" ticker is screened again after this long (ticker reuse)
+VERDICT_RECHECK_DAYS = 180  # a settled ticker is screened again after this long (ticker reuse)
+SETTLED_VERDICTS = ("old", "secondary")
 
 
 def young_candidates(
@@ -52,6 +53,13 @@ def average_dollar_volume(frame: pd.DataFrame, days: int) -> float:
 def _cik_by_ticker(ticker_map: pd.DataFrame) -> dict[str, int]:
     """Tickers with a usable CIK. A listing without one can never get a market cap."""
     return {t: int(c) for t, c in zip(ticker_map["ticker"], ticker_map["cik"], strict=True)
+            if pd.notna(c)}
+
+
+def _primary_ticker(ticker_map: pd.DataFrame) -> dict[str, str]:
+    """{ticker: the first ticker SEC lists for the same CIK}, i.e. the company's main listing."""
+    first = ticker_map.drop_duplicates("cik").set_index("cik")["ticker"]
+    return {t: first[c] for t, c in zip(ticker_map["ticker"], ticker_map["cik"], strict=True)
             if pd.notna(c)}
 
 
@@ -142,19 +150,20 @@ def screen_young_listings(
     a young listing while it was young. Tickers whose prices are already stored are not
     downloaded or rewritten; their first stored bar from the primary provider dates the listing,
     and a stored history that a fallback reaches back further in is not used this week.
-    Tickers judged "old" (history reaching back to the start) are not screened again for
-    VERDICT_RECHECK_DAYS, so their full histories are not downloaded every week.
+    Tickers judged "old" (history reaching back to the start) or "secondary" (a newer listing
+    under an old company's CIK) are not screened again for VERDICT_RECHECK_DAYS, so their full
+    histories are not downloaded every week.
     """
     revalidate_young_listings(conn, primary.name, history_start)
     verdicts = _load_verdicts(conn)
-    settled_old = {t for t, (v, d) in verdicts.items()
-                   if v == "old" and (today - d).days < VERDICT_RECHECK_DAYS}
+    settled = {t for t, (v, d) in verdicts.items()
+               if v in SETTLED_VERDICTS and (today - d).days < VERDICT_RECHECK_DAYS}
     cik_by_ticker = _cik_by_ticker(ticker_map)
     listed = young_candidates(ticker_map)
     for t in listed:
         if t not in cik_by_ticker:
             verdicts[t] = ("no_cik", today)
-    candidates = [t for t in listed if t in cik_by_ticker and t not in settled_old]
+    candidates = [t for t in listed if t in cik_by_ticker and t not in settled]
     window_start = today - timedelta(days=screen_window_days(rules))
     recent = primary.fetch(candidates, window_start, today) if candidates else {}
     liquid = sorted(t for t, f in recent.items() if _current_and_liquid(f, rules, today))
@@ -165,7 +174,7 @@ def screen_young_listings(
     full, splits = (fetch_frames_and_splits(primary, to_download, history_start, today)
                     if to_download else ({}, {}))
 
-    kept, rows = [], []
+    young: list[tuple[str, date, pd.DataFrame | None]] = []
     for ticker in liquid:
         if ticker in stored:
             first = _primary_first_date(*stored[ticker])
@@ -182,11 +191,26 @@ def screen_young_listings(
         if first <= history_start + CLIPPED_MARGIN:
             verdicts[ticker] = ("old", today)
             continue  # may have been clipped by the start date: not young inside the window
+        young.append((ticker, first, frame))
+
+    # A newer listing under an old company's CIK is not a young company: an ETN under the issuing
+    # bank, a further series of a commodity trust, a new class or note of an old issuer. Its price
+    # times the company's share count is no market cap either.
+    primary_of = _primary_ticker(ticker_map)
+    secondary = [t for t, _, _ in young
+                 if primary_of.get(t, t) != t and verdicts.get(primary_of[t], ("",))[0] == "old"]
+    kept, rows = [], []
+    for ticker, first, frame in young:
+        if ticker in secondary:
+            verdicts[ticker] = ("secondary", today)
+            continue
         if frame is not None:
             replace_prices(conn, ticker, frame, primary.name, splits.get(ticker))
         rows.append((ticker, cik_by_ticker[ticker], first.isoformat(), today.isoformat()))
         verdicts[ticker] = ("young", today)
         kept.append(ticker)
+    with conn:
+        conn.executemany("DELETE FROM young_listings WHERE ticker = ?", [(t,) for t in secondary])
     upsert_rows(conn, "young_listings", ["ticker", "cik", "first_trade_date", "screened_on"], rows)
     _save_verdicts(conn, verdicts, today)
     return kept

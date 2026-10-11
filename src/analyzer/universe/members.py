@@ -10,7 +10,9 @@ from analyzer.config import UniverseRules
 from analyzer.universe.market_cap import market_cap_on
 from analyzer.universe.membership import INDEXES, members_on
 
-BLANK_CHECK_SIC = "6770"
+# Registrants that are not operating companies: blank checks (SPACs) and commodity or crypto
+# trusts (SIC 6221, e.g. bitcoin and gold ETFs that file 10-Ks). Their listings are not stocks.
+NON_OPERATING_SICS = ("6770", "6221")
 MAX_BAR_AGE_DAYS = 7  # a stock is only tradable on d if its newest bar is at most this old
 
 
@@ -68,8 +70,9 @@ def universe_on(conn, d: date, rules: UniverseRules,
 
     young = conn.execute(
         "SELECT y.ticker, y.cik FROM young_listings y LEFT JOIN companies c ON c.cik = y.cik "
-        "WHERE y.first_trade_date > ? AND y.first_trade_date <= ? AND COALESCE(c.sic, '') <> ?",
-        (young_cutoff(d, rules).isoformat(), d.isoformat(), BLANK_CHECK_SIC),
+        "WHERE y.first_trade_date > ? AND y.first_trade_date <= ? "
+        f"AND COALESCE(c.sic, '') NOT IN ({', '.join('?' * len(NON_OPERATING_SICS))})",
+        (young_cutoff(d, rules).isoformat(), d.isoformat(), *NON_OPERATING_SICS),
     ).fetchall()
     for ticker, cik in young:
         if ticker in index_members or cik is None:  # index membership wins

@@ -38,14 +38,16 @@ def conn(tmp_path):
         ("SMALLNEW", 101, "2024-01-02", "2026-10-09"),
         ("SPACCO", 102, "2024-01-02", "2026-10-09"),
         ("AGED", 103, "2019-06-03", "2026-10-09"),
+        ("COINTR", 104, "2024-01-02", "2026-10-09"),
     ])
     c.execute("INSERT INTO companies VALUES (102, 'Spac', '6770', 'Blank Checks', 'x')")
-    shares = [(100, 1e8), (101, 1e7), (102, 1e9), (103, 1e9)]  # × $50 close
+    c.execute("INSERT INTO companies VALUES (104, 'Coin Trust', '6221', 'Commodity Contracts', 'x')")
+    shares = [(100, 1e8), (101, 1e7), (102, 1e9), (103, 1e9), (104, 1e9)]  # × $50 close
     c.executemany(
         "INSERT INTO facts VALUES (?, 'shares_outstanding', 'dei:EntityCommonStockSharesOutstanding',"
         " 'shares', '', '2026-06-30', ?, '2026-08-01', '10-Q', 'acc' || ?, 'companyfacts')",
         [(cik, n, cik) for cik, n in shares])
-    for t in ("AAPL", "MID", "BIGNEW", "SMALLNEW", "SPACCO", "AGED"):
+    for t in ("AAPL", "MID", "BIGNEW", "SMALLNEW", "SPACCO", "AGED", "COINTR"):
         liquid(c, t)
     liquid(c, "THINIDX", volume=1_000.0)
     return c
@@ -58,7 +60,8 @@ def test_universe_on_applies_all_filters(conn):
         Member("BIGNEW", 100, "young"),   # $5B cap
         Member("MID", 2, "sp400"),
     ]
-    # SMALLNEW: $500M cap. SPACCO: blank check. AGED: listed > 5 years before D.
+    # SMALLNEW: $500M cap. SPACCO: blank check. COINTR: commodity trust, not a stock.
+    # AGED: listed > 5 years before D.
     # THINIDX: illiquid. GONE: left the index.
 
 
@@ -68,7 +71,7 @@ def test_universe_on_a_past_date(conn):
 
 def test_price_symbols_split_active_and_historical(conn):
     active, historical = price_symbols(conn, D, RULES)
-    assert active == ["AAPL", "BIGNEW", "MID", "SMALLNEW", "SPACCO", "THINIDX"]
+    assert active == ["AAPL", "BIGNEW", "COINTR", "MID", "SMALLNEW", "SPACCO", "THINIDX"]
     assert historical == ["AGED", "GONE"]
 
 
@@ -261,7 +264,7 @@ def test_price_symbols_active_window_follows_today(conn):
     # ten years on, BIGNEW and the others have aged out of the 5-year window
     active, historical = price_symbols(conn, date(2031, 10, 9), RULES)
     assert active == ["AAPL", "MID", "THINIDX"]
-    assert historical == ["AGED", "BIGNEW", "GONE", "SMALLNEW", "SPACCO"]
+    assert historical == ["AGED", "BIGNEW", "COINTR", "GONE", "SMALLNEW", "SPACCO"]
 
 
 # --- fix round 1: recency guard, screened index tickers, price_symbols boundary ---------------

@@ -434,3 +434,50 @@ def test_unreadable_verdicts_only_cost_a_recheck(tmp_path):
     assert len(_full_calls(yf, "OLDADR")) == 4
     screen_young_listings(conn, yf, tm, RULES, TODAY)
     assert len(_full_calls(yf, "OLDADR")) == 4
+
+
+def test_secondary_listing_of_an_old_company_is_not_young(tmp_path):
+    # ETNs are listed under the issuing bank's CIK; the bank's own stock is the primary ticker.
+    conn = fresh_conn(tmp_path)
+    conn.execute("INSERT INTO young_listings VALUES ('GDXU', 927971, '2023-03-01', '2026-10-02')")
+    tm = ticker_map([(927971, "Bank", "BMO", "NYSE"), (927971, "Bank", "FNGU", "NYSE"),
+                     (927971, "Bank", "GDXU", "NYSE")])
+    data = {
+        "BMO": bars(pd.bdate_range("2009-01-02", "2026-10-09"), 90.0, volume=1_000_000.0),
+        "FNGU": bars(pd.bdate_range("2023-03-01", "2026-10-09"), 50.0, volume=1_000_000.0),
+        "GDXU": bars(pd.bdate_range("2023-03-01", "2026-10-09"), 50.0, volume=1_000_000.0),
+    }
+    kept = screen_young_listings(conn, FakeProvider("yfinance", data), tm, RULES, TODAY)
+    assert kept == []
+    assert conn.execute("SELECT COUNT(*) FROM young_listings").fetchone() == (0,)
+
+
+def test_secondary_listing_is_young_when_the_primary_is_young_too(tmp_path):
+    conn = fresh_conn(tmp_path)
+    tm = ticker_map([(5, "Dual", "DUALA", "Nasdaq"), (5, "Dual", "DUALK", "Nasdaq")])
+    data = {t: bars(pd.bdate_range("2023-03-01", "2026-10-09"), 50.0, volume=1_000_000.0)
+            for t in ("DUALA", "DUALK")}
+    kept = screen_young_listings(conn, FakeProvider("yfinance", data), tm, RULES, TODAY)
+    assert kept == ["DUALA", "DUALK"]
+
+
+def test_secondary_listing_is_young_when_the_primary_is_not_judged(tmp_path):
+    conn = fresh_conn(tmp_path)  # the primary trades too thinly to be screened
+    tm = ticker_map([(5, "Dual", "DUALA", "Nasdaq"), (5, "Dual", "DUALK", "Nasdaq")])
+    data = {"DUALA": bars(days(60), 5.0, volume=1_000.0),
+            "DUALK": bars(pd.bdate_range("2023-03-01", "2026-10-09"), 50.0, volume=1_000_000.0)}
+    kept = screen_young_listings(conn, FakeProvider("yfinance", data), tm, RULES, TODAY)
+    assert kept == ["DUALK"]
+
+
+def test_secondary_verdict_is_remembered_so_the_listing_is_not_fetched_weekly(tmp_path):
+    conn = fresh_conn(tmp_path)
+    tm = ticker_map([(927971, "Bank", "BMO", "NYSE"), (927971, "Bank", "FNGU", "NYSE")])
+    data = {
+        "BMO": bars(pd.bdate_range("2009-01-02", "2026-10-09"), 90.0, volume=1_000_000.0),
+        "FNGU": bars(pd.bdate_range("2023-03-01", "2026-10-09"), 50.0, volume=1_000_000.0),
+    }
+    screen_young_listings(conn, FakeProvider("yfinance", data), tm, RULES, TODAY)
+    provider = FakeProvider("yfinance", data)
+    screen_young_listings(conn, provider, tm, RULES, TODAY + timedelta(days=7))
+    assert provider.calls == []
