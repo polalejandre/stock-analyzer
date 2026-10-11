@@ -33,6 +33,69 @@ it until phase 1 is closed.
       snapshots. Not run yet: the rest of the prices (from about "S"), the young-listing
       screen, EDGAR and macro. Expected remaining time: about 2–3 hours, mostly EDGAR.
 
+## First full update and audit (2026-10-11)
+
+The resumed update ran from 09:32 to 12:41 and exited cleanly. Log:
+`data/logs/update-2026-10-11.log`; audit output: `data/logs/audit-2026-10-11.log`.
+
+| Step | Attempted | Failed | Notes |
+|---|---|---|---|
+| universe | 22 | 1 | Today's S&P 400 page got HTTP 429; all 19 missed months were filled. |
+| prices | 932 | 0 | 1,063 symbols topped up; 533 past members have no prices (delisted or renamed). |
+| edgar | 3,561 | 0 | 1,779 companies; 44,548 Form 4 XML filings parsed. 2 instance fallbacks got an invalid body. |
+| macro | 6 | 0 | |
+
+Coverage after the run:
+
+- Tickers: 2,358 (1,117 active, 1,241 inactive). 1,825 have prices (5.78M bars, 1,853 symbols
+  including reference ETFs). Every reference ETF has prices.
+- CIKs mapped: 1,794 of 2,358 tickers; 1,780 companies stored.
+- Fundamentals: 1,526 tickers with 8+ revenue quarters; 1,292 with a recent FCF (four quarters
+  of operating cash flow and capex). 3.86M facts; 1.35M filings. Companyfacts behind the
+  latest 10-Q/10-K: 7.
+- Insider rows: 1.82M for 1,756 issuers, 2013-01-02 to 2026-10-09.
+- FRED: all 6 series, through 2026-10-09 at the latest. BAMLH0A0HYM2 (high-yield spread)
+  starts only at 2023-10-10, because FRED now publishes just 3 years of the ICE BofA series.
+- Audit flags on active tickers: 379. By flag: no FCF 174, check CIK merge 140, no
+  fundamentals 87, no FCF (financials, expected) 7, companyfacts behind 4, no sector ETF 3.
+  The root-cause analysis of these flags is in "Audit findings" below.
+
+## Audit findings (2026-10-11)
+
+Root causes of the 379 flags, from the stored facts and the cached companyfacts files:
+
+1. **Capex tags we don't map (no FCF, about 100 tickers).** Operating cash flow is present for
+   all 181 "no FCF" tickers; capex is what is missing. Recent capex sits under tags outside the
+   map: PaymentsForCapitalImprovements (26, mostly REITs), PaymentsToAcquireOtherPropertyPlantAndEquipment
+   (14, e.g. LLY, EOG), PaymentsToAcquireOtherProductiveAssets (11, e.g. VZ),
+   PaymentsToDevelopRealEstateAssets (11, REITs), PaymentsForProceedsFromProductiveAssets (7,
+   net of sale proceeds), PaymentsToAcquireRealEstate (6), oil-and-gas development tags (5).
+   Some of these are components, not totals, so each needs a rule, not just a list entry.
+   40 more (e.g. COP, PSX, NEE, URI, ABNB) report capex only under company extension tags.
+2. **Revenue tags we don't map (check CIK merge, about 60 tickers).** Before ASC 606 (2018),
+   many companies tagged revenue as SalesRevenueGoodsNet (45) or SalesRevenueServicesNet (17).
+   These are components: a company reporting both needs their sum.
+3. **Real CIK reorganizations (check CIK merge, about 40 tickers).** New holding companies with
+   a new CIK, e.g. GOOG/GOOGL (Alphabet 2015), MDT (2015), AVGO (2018), LIN (2018), CI (2018),
+   DIS (2019), VTRS (2020), SW (2024), STE, ETN. Each needs a verified entry in
+   `cik_merges.toml`.
+4. **Quarters missing from companyfacts (no FCF, about 57 tickers).** The tag is mapped but
+   companyfacts lacks some 10-Q periods: IDA has no Q1 2026 value; CHD has no 9-month 2025
+   value. Young listings with fewer than 4 quarters filed are in this group too and are expected.
+5. **Q4 derived from mixed vintages.** BAX: the FY2023 capex is a later restatement (432M,
+   filed 2026) but the 9-month value is the original (502M, filed 2023), so the derived Q4 is
+   -70M. The derivation must not mix a restated annual value with original year-to-date values.
+6. **Non-stocks in the young-listing screen.** The spec says "US-listed common stocks", but the
+   screen keeps about 25 non-stocks: commodity and crypto trusts (SIC 6221, e.g. IBIT, ETHA,
+   GLDM), ETNs filed under the issuing bank's CIK (FNGU, SPYU, Bank of Montreal) and
+   closed-end funds (PDI).
+7. **No fundamentals, expected or out of scope (about 70 tickers).**
+   - Foreign private issuers filing IFRS 20-F (ARM, NU, BIRK, HLN, KSPI, JBS).
+   - Mortgage REITs and BDCs (AGNC, NLY, BXSL).
+   - Listings too new to have a 10-Q (VYLR, TRAX, SKHY).
+   - OZK, which files with the FDIC, not SEC.
+   - Banks, which have no revenue line in the map.
+
 ## Next steps (resume here)
 
 1. Resume the first update (planned for the morning of 2026-10-11):
