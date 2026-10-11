@@ -1,0 +1,8 @@
+# Every threshold and weight used by the engine. Bump `version` whenever any value changes.
+version = "2026.10.10-1"
+
+[universe]
+min_dollar_volume = 25_000_000      # average close × volume over `dollar_volume_days`, USD
+dollar_volume_days = 20
+young_max_years = 5                 # a young listing first traded less than this many years ago
+young_min_market_cap = 2_000_000_000

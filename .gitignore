@@ -4,3 +4,7 @@ __pycache__/
 cache/
 preview.html
 .env
+/data/
+/reports/
+.pytest_cache/
+.ruff_cache/

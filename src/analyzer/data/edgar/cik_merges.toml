@@ -1,0 +1,114 @@
+# Companies whose XBRL history continues under a predecessor CIK, for example after a
+# holding-company reorganization. `ticker` is resolved to its current CIK through SEC's
+# ticker map; a predecessor equal to the current CIK is ignored.
+# Verified by the live test in Task 17 and by `analyzer audit` (flag "check CIK merge").
+#
+# Entries added 2026-10-11 from the first full audit. Each predecessor was checked against SEC:
+# its name, and its revenue for every period it shares with its successor's comparatives (all
+# agree within 0.5%, except one or two restated periods for LIN, CI, STE and TPL). Rejected:
+# APO (only 7 of 16 periods agree after the Athene merger), reorganizations whose accounting
+# predecessor files no XBRL (SW, TKO, FTI, BKR, DD, CRH).
+
+[[merge]]
+ticker = "XOM"
+predecessor_ciks = [34088]
+
+# Alphabet (2015) <- Google Inc. GOOG shares the CIK.
+[[merge]]
+ticker = "GOOGL"
+predecessor_ciks = [1288776]
+
+# Medtronic plc (2015) <- Medtronic Inc.
+[[merge]]
+ticker = "MDT"
+predecessor_ciks = [64670]
+
+# Broadcom Inc. (2018) <- Broadcom Ltd/Pte (2016) <- Avago.
+[[merge]]
+ticker = "AVGO"
+predecessor_ciks = [1649338, 1441634]
+
+# Linde plc (2018) <- Praxair (now Linde Inc.).
+[[merge]]
+ticker = "LIN"
+predecessor_ciks = [884905]
+
+# The Cigna Group (2018) <- Cigna Corp (now Cigna Holding Co).
+[[merge]]
+ticker = "CI"
+predecessor_ciks = [701221]
+
+# Walt Disney Co (2019) <- old Disney (now TWDC Enterprises 18).
+[[merge]]
+ticker = "DIS"
+predecessor_ciks = [1001039]
+
+# Viatris (2020) <- Mylan N.V. (2015) <- Mylan Inc.
+[[merge]]
+ticker = "VTRS"
+predecessor_ciks = [1623613, 69499]
+
+# Eaton plc (2012) <- Eaton Corp.
+[[merge]]
+ticker = "ETN"
+predecessor_ciks = [31277]
+
+# STERIS plc (2019) <- STERIS plc UK (2015) <- STERIS Corp.
+[[merge]]
+ticker = "STE"
+predecessor_ciks = [1624899, 815065]
+
+# APA Corp (2021) <- Apache.
+[[merge]]
+ticker = "APA"
+predecessor_ciks = [6769]
+
+# Bunge Global SA (2023) <- Bunge Ltd.
+[[merge]]
+ticker = "BG"
+predecessor_ciks = [1144519]
+
+# Ferguson Enterprises (2024) <- Ferguson plc.
+[[merge]]
+ticker = "FERG"
+predecessor_ciks = [1832433]
+
+# Evergy (2018) <- Westar Energy (now Evergy Kansas Central).
+[[merge]]
+ticker = "EVRG"
+predecessor_ciks = [54507]
+
+# HF Sinclair (2022) <- HollyFrontier.
+[[merge]]
+ticker = "DINO"
+predecessor_ciks = [48039]
+
+# Ovintiv (2020) <- Encana.
+[[merge]]
+ticker = "OVV"
+predecessor_ciks = [1157806]
+
+# NorthWestern Energy Group (2023) <- NorthWestern Corp.
+[[merge]]
+ticker = "NWE"
+predecessor_ciks = [73088]
+
+# Southwest Gas Holdings (2017) <- Southwest Gas Corp.
+[[merge]]
+ticker = "SWX"
+predecessor_ciks = [92416]
+
+# Texas Pacific Land Corp (2021) <- Texas Pacific Land Trust.
+[[merge]]
+ticker = "TPL"
+predecessor_ciks = [97517]
+
+# BlackRock (2024 holding company) <- BlackRock Inc. (now BlackRock Finance).
+[[merge]]
+ticker = "BLK"
+predecessor_ciks = [1364742]
+
+# Marvell Technology Inc. (2021) <- Marvell Technology Group.
+[[merge]]
+ticker = "MRVL"
+predecessor_ciks = [1058057]
