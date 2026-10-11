@@ -225,8 +225,10 @@ Deferred to phase 2:
    - FRED series.
 3. Fix any real-world mismatches the audit shows. Then run `analyzer update` again to fill the
    Wikipedia months that got 429.
-4. Close phase 1: merge `phase-1-data-layer` into `main` (needs the owner's OK), then delete the
-   SDD workspace.
+4. Done 2026-10-11: `phase-1-data-layer` merged into `main` with the owner's OK (6f8c17a), not
+   pushed. The SDD workspace `.superpowers/sdd/2026-10-10-phase-1-data-layer/` is kept, by the
+   owner's choice. It is gitignored, and it is the only full record of the phase-1 rulings and
+   review rounds.
 5. Optional, recommended: a throwaway preview page built from the stored data. It would list:
    - drawdown from high;
    - basic valuation;
