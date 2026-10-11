@@ -23,6 +23,7 @@ class Settings:
     sec_user_agent: str
     fred_api_key: str | None = field(repr=False)
     data_dir: Path
+    wikipedia_contact: str | None = None  # email for the Wikipedia User-Agent (their policy)
 
     @property
     def db_path(self) -> Path:
@@ -47,11 +48,19 @@ def load_settings(root: Path = PROJECT_ROOT, environ: Mapping[str, str] | None =
             "SEC_USER_AGENT still holds the .env.example placeholder address; "
             "set a real contact email (SEC requirement)."
         )
+    wikipedia_contact = (env.get("WIKIPEDIA_CONTACT") or "").strip() or None
+    if wikipedia_contact is not None and (
+        "@" not in wikipedia_contact or PLACEHOLDER_DOMAIN in wikipedia_contact.lower()
+    ):
+        raise ConfigError(
+            "WIKIPEDIA_CONTACT must be a real contact email, or left unset. See .env.example."
+        )
     data_dir = Path(env.get("ANALYZER_DATA_DIR") or root / "data")
     return Settings(
         sec_user_agent=user_agent,
         fred_api_key=(env.get("FRED_API_KEY") or "").strip() or None,
         data_dir=data_dir,
+        wikipedia_contact=wikipedia_contact,
     )
 
 

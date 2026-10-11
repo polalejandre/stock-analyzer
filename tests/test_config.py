@@ -69,3 +69,32 @@ def test_env_example_placeholder_is_rejected(tmp_path):
     (tmp_path / ".env").write_text((PROJECT_ROOT / ".env.example").read_text())
     with pytest.raises(ConfigError, match="set a real contact email"):
         load_settings(root=tmp_path, environ={})
+
+
+def test_wikipedia_contact_is_optional(tmp_path):
+    s = load_settings(root=tmp_path, environ={"SEC_USER_AGENT": "a a@test.invalid"})
+    assert s.wikipedia_contact is None
+
+
+def test_wikipedia_contact_read_from_env(tmp_path):
+    s = load_settings(
+        root=tmp_path,
+        environ={"SEC_USER_AGENT": "a a@test.invalid", "WIKIPEDIA_CONTACT": " wiki@test.invalid "},
+    )
+    assert s.wikipedia_contact == "wiki@test.invalid"
+
+
+def test_wikipedia_contact_without_email_is_rejected(tmp_path):
+    with pytest.raises(ConfigError, match="WIKIPEDIA_CONTACT"):
+        load_settings(
+            root=tmp_path,
+            environ={"SEC_USER_AGENT": "a a@test.invalid", "WIKIPEDIA_CONTACT": "nobody"},
+        )
+
+
+def test_wikipedia_contact_placeholder_is_rejected(tmp_path):
+    with pytest.raises(ConfigError, match="WIKIPEDIA_CONTACT"):
+        load_settings(
+            root=tmp_path,
+            environ={"SEC_USER_AGENT": "a a@test.invalid", "WIKIPEDIA_CONTACT": "you@example.com"},
+        )

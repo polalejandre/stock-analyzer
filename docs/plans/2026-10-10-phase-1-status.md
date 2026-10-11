@@ -64,10 +64,12 @@ it until phase 1 is closed.
 6. Phase 2: write the plan for features, signals and the research harness. It ends with the
    go/no-go of spec section 9.6. Include the phase-2 prep items below.
 
-## Open decision for the owner
+## Decided 2026-10-11
 
-- Wikipedia User-Agent contact: none at the moment. Wikipedia asks for a contact, which would
-  likely mean fewer 429s. The owner's email is already used for SEC. Owner to decide.
+- Wikipedia User-Agent contact: the owner chose a contact email. It is set as
+  `WIKIPEDIA_CONTACT` in `.env` (not committed), and the Wikipedia client adds it to its
+  User-Agent. No Wikipedia account is needed. The resumed update of 2026-10-11 started before
+  this change, so the next update is the first to send it.
 
 ## Known data gaps (found by the live run)
 
