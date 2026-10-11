@@ -162,6 +162,32 @@ Fixed in phase 1:
     were removed.
   - Live tests: 14 of 14 pass. Unit tests: 439 pass. Ruff is clean.
 
+- **Review of the fixes (2026-10-11).** An independent review returned 1 critical and 10
+  minor findings.
+  - Fixed: 4 of them (the commit after 0195b73):
+    - merged history keeps the predecessor's first report;
+    - re-extraction survives an unreadable company;
+    - the thresholds are part of the fingerprint;
+    - the contact email is validated.
+  - Not changed, on purpose:
+    - *Fallback kept or dropped using later comparatives* (rated critical). This picks the
+      meaning of a tag for a company; it does not move any value before its `filed` date.
+      Phase 2 should know that this is hindsight-based cleaning, like a data vendor's tag
+      mapping.
+    - *Fallback sums with nothing to check against are used.* Deliberate: EOG, ADP, DLR and O
+      have no standard total at all. They are flagged by no metric yet; phase 2 may mark them
+      as unverified.
+    - *Same-key instance rows are taken over by companyfacts.* Same value, and companyfacts
+      supersedes; instance rows without a companyfacts twin are kept.
+    - *A 404 leaves old rows.* Checked: no company is affected (0 of 4 uncached companies have
+      rows).
+    - *A 10-K/A recast within 366 days is differenced against the original 9 months.* Rare;
+      revisit if the phase-2 research shows outliers.
+    - *Secondary rule needs the primary judged "old"; the primary is SEC's first ticker;
+      verdicts may be one screen stale.* A thinly traded primary keeps a real second class
+      (BATRK). SEC's order matched the main listing in every sampled case, and expired
+      verdicts are pruned on every save.
+
 Deferred to phase 2:
 
 - Finding 4: quarters missing from companyfacts. Covered by the existing prep item "build TTM
