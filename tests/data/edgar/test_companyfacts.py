@@ -409,15 +409,32 @@ def test_fallback_agreeing_with_the_total_on_overlapping_periods_is_kept():
         ("2015-03-01", 6548.0, "k16"), ("2016-03-01", 7331.0, "k17")]
 
 
-def test_fallback_disagreeing_with_the_total_anywhere_is_dropped_for_the_company():
-    # Goods is only part of revenue here: it must not stand in for the total in other years.
+def test_fallback_disagreeing_with_a_later_comparative_is_dropped_for_the_company():
+    # Goods is only part of revenue here: the next 10-K repeats 2015 with the true total.
     cf = {"facts": {"us-gaap": {
         "SalesRevenueGoodsNet": usd(
-            fact("2015-01-01", "2015-12-31", 119, "2016-02-20", "k15", form="10-K"),
-            fact("2016-01-01", "2016-12-31", 97, "2017-02-20", "k16", form="10-K")),
-        "Revenues": usd(fact("2016-01-01", "2016-12-31", 1397, "2017-02-20", "k16", form="10-K")),
+            fact("2014-01-01", "2014-12-31", 125, "2015-02-20", "k14", form="10-K"),
+            fact("2015-01-01", "2015-12-31", 119, "2016-02-20", "k15", form="10-K")),
+        "Revenues": usd(fact("2015-01-01", "2015-12-31", 1871, "2017-02-20", "k16", form="10-K"),
+                        fact("2016-01-01", "2016-12-31", 1397, "2017-02-20", "k16", form="10-K")),
     }}}
-    assert [r[0] for r in _rows(cf, 3453, "revenue")] == ["us-gaap:Revenues"]
+    assert {r[0] for r in _rows(cf, 3453, "revenue")} == {"us-gaap:Revenues"}
+
+
+def test_a_breakdown_next_to_the_total_in_one_filing_does_not_reject_the_fallback():
+    # KO: goods net was the whole of revenue until 2018, when the 10-Q started reporting it as a
+    # breakdown line next to the new total tag.
+    cf = {"facts": {"us-gaap": {
+        "SalesRevenueGoodsNet": usd(
+            fact("2017-01-01", "2017-12-31", 35410, "2018-02-23", "k17", form="10-K"),
+            fact("2018-01-01", "2018-06-29", 16553, "2018-07-26", "q18")),
+        "RevenueFromContractWithCustomerExcludingAssessedTax": usd(
+            fact("2017-01-01", "2017-12-31", 35410, "2019-02-22", "k18", form="10-K"),
+            fact("2018-01-01", "2018-06-29", 17719, "2018-07-26", "q18")),
+    }}}
+    rows = _rows(cf, 21344, "revenue")
+    assert [(r[1], r[3], r[4]) for r in rows if r[0] == "us-gaap:SalesRevenueGoodsNet"] == [
+        ("2017-01-01", 35410.0, "k17")]
 
 
 def test_capex_fallback_sums_the_property_lines_of_a_filing():

@@ -69,7 +69,9 @@ def _agrees(value: float, totals: set[float]) -> bool:
 
 def _fallback_rows(facts: dict, concept: Concept, cik: int, primary: list[tuple]) -> list[tuple]:
     """One summed row per (period, filing) with fallback tags and no primary tag; none at all if
-    any sum disagrees with a primary value of the same period, from the same or another filing."""
+    any such sum disagrees with a primary value of the same period from another filing (usually
+    a later report's comparative). Fallback lines next to the total in the same filing are a
+    breakdown of it and are neither used nor compared."""
     groups: dict[tuple, dict[str, tuple]] = {}
     for qualified in concept.fallback_tags:
         for r in _tag_rows(facts, concept, qualified, cik):
@@ -80,6 +82,8 @@ def _fallback_rows(facts: dict, concept: Concept, cik: int, primary: list[tuple]
     covered = {(r[4], r[5], r[9]) for r in primary}
     out = []
     for key, parts in groups.items():
+        if key in covered:
+            continue
         start, end, _accn = key
         first = next(iter(parts.values()))
         value = sum(r[6] for r in parts.values())
@@ -87,9 +91,8 @@ def _fallback_rows(facts: dict, concept: Concept, cik: int, primary: list[tuple]
             log.debug("CIK %d: %s fallback %s disagrees with its total for %s..%s; not used",
                       cik, concept.name, "+".join(parts), start, end)
             return []
-        if key not in covered:
-            out.append((*first[:2], "+".join(parts), *first[3:6], value,
-                        max(r[7] for r in parts.values()), *first[8:]))
+        out.append((*first[:2], "+".join(parts), *first[3:6], value,
+                    max(r[7] for r in parts.values()), *first[8:]))
     return out
 
 

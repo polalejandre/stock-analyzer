@@ -17,7 +17,7 @@ class Concept:
     tags: tuple[str, ...]
     # Partial lines that some companies report instead of a total: summed per filing when that
     # filing has none of `tags` for the period, and dropped for a company whose sums disagree
-    # with its own total on any period both cover (see companyfacts.extract_facts).
+    # with its own total from another filing (see companyfacts.extract_facts).
     fallback_tags: tuple[str, ...] = ()
 
 
@@ -69,7 +69,7 @@ CONCEPTS: tuple[Concept, ...] = (
 
 CONCEPT_BY_NAME = {c.name: c for c in CONCEPTS}
 # Bump when companyfacts.extract_facts changes how it reads the tags (e.g. the fallback rule).
-EXTRACTION_RULES = 2
+EXTRACTION_RULES = 3
 # Changes with any concept, tag, fallback or extraction rule; stored facts are then re-extracted.
 TAG_MAP_FINGERPRINT = hashlib.sha256(
     f"{EXTRACTION_RULES}:{CONCEPTS!r}".encode()).hexdigest()[:16]
