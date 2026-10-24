@@ -2,12 +2,15 @@ import math
 
 import pandas as pd
 
+from analyzer.data.edgar.quarters import discrete_quarters
 from analyzer.panel.steps import (
     add_missing_periods,
     annual_steps,
     combine_ttm,
     fallback_ends,
+    first_versions,
     instant_steps,
+    latest_value_steps,
     quarter_steps,
     sum_periods,
     total_debt,
@@ -121,3 +124,196 @@ def test_bank_revenue_fills_only_missing_periods():
 def test_fallback_ends_detects_summed_rows():
     f = _facts([("2023-01-01", "2023-03-31", 1, "2023-05-01")], tag="us-gaap:A+us-gaap:B")
     assert fallback_ends(f, ()) == frozenset({T("2023-03-31")})
+
+
+# ---- fix round 1: truncation invariance and review findings ----------------------------------
+
+def _upto(df, d):
+    return df[df["filed"] <= d]
+
+
+def _same(full, part, d):
+    exp = full[full["filed"] <= d].reset_index(drop=True)
+    pd.testing.assert_frame_equal(exp, part.reset_index(drop=True), check_dtype=False)
+
+
+def _assert_invariant(build, inputs, cuts):
+    """build(*inputs) on inputs cut at each date equals the full result's rows filed <= date."""
+    full = build(*inputs)
+    for d in map(T, cuts):
+        _same(full, build(*[_upto(x, d) for x in inputs]), d)
+
+
+def test_combine_annual_only_does_not_crash():
+    a = annual_steps(_facts([("2023-01-01", "2023-12-31", 120, "2024-02-20")]))
+    c = combine_ttm(quarter_steps(QUARTERS.iloc[:0]), a)
+    assert c["annual"].tolist() == [True] and c["ttm"].tolist() == [120]
+    assert str(c["period_end"].dtype) == "datetime64[ns]"
+    assert combine_ttm(quarter_steps(QUARTERS.iloc[:0]), annual_steps(_facts([]))).empty
+
+
+def test_combine_quarters_only_does_not_crash():
+    c = combine_ttm(quarter_steps(QUARTERS), annual_steps(_facts([])))
+    assert not c["annual"].any() and c["ttm"].iloc[-1] == 56
+
+
+def test_combine_annual_needs_more_than_a_quarter_margin():
+    q = quarter_steps(QUARTERS.iloc[:4])                          # TTM to 2023-12-31
+    a = annual_steps(_facts([("2023-01-01", "2024-01-03", 50, "2024-02-20")]))   # ends 3 days later
+    c = combine_ttm(q, a).set_index("filed")
+    assert not c.loc[T("2024-02-20"), "annual"] and c.loc[T("2024-02-20"), "ttm"] == 46
+
+
+FULL_FACTS = _facts([
+    ("2022-01-01", "2022-12-31", 100, "2023-02-20"), ("2022-01-01", "2022-12-31", 90, "2024-02-20"),
+    ("2023-01-01", "2023-12-31", 120, "2024-02-20"), ("2024-01-01", "2024-12-31", 150, "2025-02-20"),
+])
+CUTS = ["2023-02-20", "2023-12-01", "2024-02-20", "2024-06-01", "2025-02-20"]
+
+
+def test_quarter_steps_truncation_invariant():
+    _assert_invariant(quarter_steps, [QUARTERS], ["2023-08-01", "2024-02-15", "2024-03-01", "2024-05-01"])
+
+
+def test_annual_steps_truncation_invariant():
+    _assert_invariant(annual_steps, [FULL_FACTS], CUTS)
+
+
+def test_combine_truncation_invariant():
+    def build(q, f):
+        return combine_ttm(quarter_steps(q), annual_steps(f))
+    _assert_invariant(build, [QUARTERS, FULL_FACTS], CUTS + ["2023-08-01", "2024-05-01"])
+
+
+def test_instant_steps_truncation_invariant():
+    f = _facts([(None, "2023-03-31", 10, "2023-05-01"), (None, "2023-06-30", 20, "2023-08-01"),
+                (None, "2023-06-30", 99, "2024-08-01"), (None, "2023-09-30", 30, "2023-11-01")])
+    _assert_invariant(instant_steps, [f], ["2023-05-01", "2023-09-01", "2023-11-01", "2024-08-01"])
+
+
+def test_latest_value_steps_truncation_invariant():
+    f = _facts([("2023-01-01", "2023-06-30", 5, "2023-08-01"), ("2023-04-01", "2023-06-30", 4, "2023-08-01"),
+                ("2023-01-01", "2023-03-31", 3, "2023-05-01"), ("2023-04-01", "2023-06-30", 8, "2024-08-01"),
+                ("2023-01-01", "2023-09-30", 6, "2023-11-01")])
+    _assert_invariant(latest_value_steps, [f], ["2023-05-01", "2023-08-01", "2023-11-01", "2024-08-01"])
+
+
+def test_latest_value_prefers_shortest_duration_regardless_of_order():
+    rows = [("2023-01-01", "2023-06-30", 5, "2023-08-01"), ("2023-04-01", "2023-06-30", 4, "2023-08-01"),
+            ("2023-01-01", "2023-03-31", 3, "2023-05-01")]
+    a = latest_value_steps(_facts(rows)).set_index("filed")
+    b = latest_value_steps(_facts(rows[::-1])).set_index("filed")
+    assert a.loc[T("2023-08-01"), "value"] == 4
+    assert a.loc[T("2023-08-01"), "period_end"] == T("2023-06-30")
+    assert a["value"].tolist() == b["value"].tolist() == [3, 4]
+
+
+def test_debt_known_when_each_line_is_first_filed():
+    nc = _facts([(None, "2019-12-31", 100, "2020-02-15")], tag="us-gaap:LongTermDebtNoncurrent")
+    cp = _facts([(None, "2019-12-31", 5, "2021-02-15")], tag="us-gaap:CommercialPaper")
+    d = total_debt(nc, cp)
+    assert d["value"].tolist() == [100, 105]
+    assert d["filed"].tolist() == [T("2020-02-15"), T("2021-02-15")]
+    s = instant_steps(d, keep_updates=True).set_index("filed")
+    assert s.loc[T("2020-02-15"), "value"] == 100 and s.loc[T("2021-02-15"), "value"] == 105
+    d2 = total_debt(cp.assign(filed=T("2020-01-01")), nc)         # short line first
+    assert d2["value"].tolist() == [5, 105]
+
+
+def test_overlapping_short_line_does_not_delay_filed():
+    ltd = _facts([(None, "2019-12-31", 100, "2020-02-15")], tag="us-gaap:LongTermDebt")
+    cur = _facts([(None, "2019-12-31", 10, "2021-02-15")], tag="us-gaap:LongTermDebtCurrent")
+    d = total_debt(ltd, cur)
+    assert d["value"].tolist() == [100] and d["filed"].tolist() == [T("2020-02-15")]
+
+
+def test_total_debt_truncation_invariant():
+    nc = _facts([(None, "2019-12-31", 100, "2020-02-15"), (None, "2020-12-31", 110, "2021-02-15")],
+                tag="us-gaap:LongTermDebtNoncurrent")
+    cp = _facts([(None, "2019-12-31", 5, "2021-02-15"), (None, "2020-12-31", 6, "2021-02-15")],
+                tag="us-gaap:CommercialPaper")
+    _assert_invariant(total_debt, [nc, cp], ["2020-02-15", "2020-12-01", "2021-02-15"])
+    ltd = _facts([(None, "2019-12-31", 100, "2020-02-15")], tag="us-gaap:LongTermDebt")
+    cur = _facts([(None, "2019-12-31", 10, "2021-02-15")], tag="us-gaap:LongTermDebtCurrent")
+    _assert_invariant(total_debt, [ltd, cur], ["2020-02-15", "2021-02-15"])
+
+
+def test_bank_sum_known_before_late_comparative_primary():
+    bank = _q([("2018-01-01", "2018-03-31", 10, "2018-05-01")])
+    rev = _q([("2018-01-01", "2018-03-31", 12, "2019-05-01")])    # first reported as a comparative
+    merged = add_missing_periods(rev, bank)
+    assert sorted(merged["filed"]) == [T("2018-05-01"), T("2019-05-01")]
+    s = quarter_steps(merged).set_index("filed")
+    assert s.loc[T("2018-05-01"), "q0"] == 10 and s.loc[T("2019-05-01"), "q0"] == 12
+    assert len(s) == 2
+    later = _q([("2018-01-01", "2018-03-31", 12, "2018-04-01")])  # primary already known: extra dropped
+    assert len(add_missing_periods(later, bank)) == 1
+
+
+def test_bank_sum_and_missing_periods_truncation_invariant():
+    nii = _q([("2018-01-01", "2018-03-31", 7, "2018-05-01"), ("2018-04-01", "2018-06-30", 7, "2018-08-01")])
+    non = _q([("2018-01-01", "2018-03-31", 3, "2018-05-01"), ("2018-04-01", "2018-06-30", 3, "2018-08-02")])
+    rev = _q([("2018-01-01", "2018-04-01", 12, "2019-05-01")]).assign(
+        period_end=T("2018-04-02"), days=92)                       # end a day off, filed much later
+
+    def build(n, o, r):
+        return add_missing_periods(r, sum_periods(n, o))
+
+    cuts = ["2018-05-01", "2018-08-01", "2018-08-02", "2019-05-01"]
+    full = build(nii, non, rev).sort_values(["filed", "period_end"])
+    for d in map(T, cuts):
+        part = build(_upto(nii, d), _upto(non, d), _upto(rev, d)).sort_values(["filed", "period_end"])
+        _same(full, part, d)
+    s = sum_periods(nii, non)
+    for d in map(T, cuts):
+        _same(s, sum_periods(_upto(nii, d), _upto(non, d)), d)
+
+
+def test_fallback_flag_follows_the_first_filed_version():
+    primary_then_fb = pd.concat([
+        _facts([("2023-01-01", "2023-03-31", 1, "2023-05-01")], tag="us-gaap:Revenues"),
+        _facts([("2023-01-01", "2023-03-31", 1, "2024-05-01")], tag="us-gaap:A+us-gaap:B")], ignore_index=True)
+    assert fallback_ends(primary_then_fb, ()) == frozenset()
+    fb_first = primary_then_fb.assign(filed=primary_then_fb["filed"].iloc[::-1].to_numpy())
+    assert fallback_ends(fb_first, ()) == frozenset({T("2023-03-31")})
+    assert fallback_ends(primary_then_fb.iloc[:0], ()) == frozenset()
+
+
+def test_fallback_ends_truncation_invariant():
+    f = pd.concat([
+        _facts([("2023-01-01", "2023-03-31", 1, "2023-05-01")], tag="us-gaap:Revenues"),
+        _facts([("2023-01-01", "2023-03-31", 1, "2024-05-01")], tag="us-gaap:A+us-gaap:B"),
+        _facts([("2023-04-01", "2023-06-30", 1, "2023-08-01")], tag="us-gaap:A+us-gaap:B"),
+        _facts([("2023-04-01", "2023-06-30", 1, "2024-08-01")], tag="us-gaap:Revenues")],
+        ignore_index=True)
+    first_filed = f.groupby("period_end")["filed"].min()
+    full = fallback_ends(f, ())
+    for d in map(T, ["2023-05-01", "2023-08-01", "2024-05-01", "2024-08-01"]):
+        part = fallback_ends(_upto(f, d), ())
+        assert part == frozenset(e for e in full if first_filed[e] <= d)
+
+
+REREPORT = _facts([("2023-01-01", "2023-03-31", 10, "2023-05-01"),
+                   ("2023-04-01", "2023-06-30", 11, "2023-08-01"),
+                   ("2023-07-01", "2023-09-30", 12, "2023-11-01"),
+                   ("2023-10-01", "2023-12-31", 13, "2024-02-15"),
+                   ("2023-01-01", "2023-03-31", 10.5, "2024-02-15"),   # 10-K re-reports Q1
+                   ("2024-01-01", "2024-03-31", 20, "2024-05-01")])
+
+
+def test_first_versions_keeps_the_first_report():
+    fv = first_versions(REREPORT)
+    q1 = fv[fv["period_end"] == T("2023-03-31")]
+    assert q1["filed"].tolist() == [T("2023-05-01")] and q1["value"].tolist() == [10]
+    assert len(fv) == 5 and list(fv.columns) == list(REREPORT.columns)
+    assert first_versions(REREPORT.iloc[::-1])["value"].sum() == fv["value"].sum()
+
+
+def test_first_version_quarters_truncation_invariant():
+    def build(f):
+        return quarter_steps(discrete_quarters(first_versions(f)))
+    cuts = ["2023-05-01", "2023-11-01", "2024-02-15", "2024-05-01"]
+    full = build(REREPORT)
+    for d in map(T, cuts):
+        _same(full, build(_upto(REREPORT, d)), d)
+    assert full.set_index("filed").loc[T("2024-02-15"), "ttm"] == 46

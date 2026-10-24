@@ -61,6 +61,8 @@ def quarter_steps(quarters: pd.DataFrame,
     rows = []
     for filed, batch in quarters.sort_values(["filed", "period_end"]).groupby("filed", sort=True):
         for end, value in zip(batch["period_end"], batch["value"], strict=True):
+            for k in [k for k in known if k != end and abs((k - end).days) <= SAME_QUARTER_DAYS]:
+                del known[k]      # the same quarter with a slightly different end: newest key wins
             known[end] = float(value)
         ends = sorted(known)
         last4 = ends[-4:]
@@ -102,12 +104,20 @@ def combine_ttm(qsteps: pd.DataFrame, asteps: pd.DataFrame) -> pd.DataFrame:
     q = qsteps.assign(q_filed=qsteps["filed"]).sort_values("filed")
     a = (asteps.rename(columns={"period_end": "a_end", "ttm": "a_ttm", "fallback": "a_fallback"})
          .assign(a_filed=asteps["filed"]).sort_values("filed"))
-    qq = pd.merge_asof(base, q, on="filed") if len(q) else base.assign(
-        **{c: np.nan for c in QUARTER_COLUMNS[1:]}, q_filed=pd.NaT)
-    aa = pd.merge_asof(base, a, on="filed") if len(a) else base.assign(
-        a_end=pd.NaT, a_ttm=np.nan, a_fallback=False, a_filed=pd.NaT)
+    if len(q):
+        qq = pd.merge_asof(base, q, on="filed")
+    else:
+        qq = base.assign(**{c: _empty([c])[c].reindex(base.index)
+                            for c in QUARTER_COLUMNS[1:]}, q_filed=pd.NaT).astype(
+            {"period_end": _DT, "q_filed": _DT, "fallback": "boolean"})
+    if len(a):
+        aa = pd.merge_asof(base, a, on="filed")
+    else:
+        aa = base.assign(a_end=pd.NaT, a_ttm=np.nan, a_fallback=False, a_filed=pd.NaT).astype(
+            {"a_end": _DT, "a_filed": _DT, "a_fallback": "boolean"})
     has_annual = aa["a_ttm"].notna()
-    newer_annual = aa["a_end"].notna() & (aa["a_end"] > pd.to_datetime(qq["period_end"]))
+    margin = pd.Timedelta(days=SAME_QUARTER_DAYS)
+    newer_annual = aa["a_end"].notna() & (aa["a_end"] > pd.to_datetime(qq["period_end"]) + margin)
     use_annual = has_annual & (qq["ttm"].isna() | newer_annual)
     out = pd.DataFrame({
         "filed": base["filed"],
@@ -130,8 +140,15 @@ def _first_reports(facts: pd.DataFrame) -> pd.DataFrame:
     return d.sort_values(sort).drop_duplicates("period_end", keep="first")
 
 
-def instant_steps(facts: pd.DataFrame) -> pd.DataFrame:
-    d = _first_reports(facts)
+def instant_steps(facts: pd.DataFrame, keep_updates: bool = False) -> pd.DataFrame:
+    """Balance-sheet values per filing. By default a date keeps its first report (later
+    restatements are ignored). `keep_updates=True` lets every row update its date in filing
+    order; `total_debt` output needs it, as its rows are first filings of its components."""
+    if keep_updates:
+        d = facts[facts["period_start"].isna()].sort_values(
+            ["filed", "accession"] if "accession" in facts else ["filed"])
+    else:
+        d = _first_reports(facts)
     if d.empty:
         return _empty(INSTANT_COLUMNS)
     known: dict[pd.Timestamp, float] = {}
@@ -147,37 +164,68 @@ def instant_steps(facts: pd.DataFrame) -> pd.DataFrame:
 
 def latest_value_steps(facts: pd.DataFrame) -> pd.DataFrame:
     """Duration facts of any length: the value with the latest period end known at each filing.
-    Used for weighted-average diluted shares."""
+    Used for weighted-average diluted shares. For one period end the shortest duration wins
+    (a quarter over its year-to-date or annual figure); ties go to the earlier filing."""
     if facts.empty:
         return _empty(LATEST_COLUMNS)
-    d = facts.sort_values("filed").drop_duplicates(["period_start", "period_end"], keep="first")
-    known: dict[pd.Timestamp, float] = {}
+    d = facts.sort_values(["filed", "accession"] if "accession" in facts else ["filed"])
+    d = d.drop_duplicates(["period_start", "period_end"], keep="first")
+    start = d["period_start"].fillna(d["period_end"])
+    d = d.assign(_dur=(d["period_end"] - start).dt.days)
+    known: dict[pd.Timestamp, tuple[int, float]] = {}
     rows = []
     for filed, batch in d.groupby("filed", sort=True):
-        for end, value in zip(batch["period_end"], batch["value"], strict=True):
-            known[end] = float(value)
+        for end, dur, value in zip(batch["period_end"], batch["_dur"], batch["value"], strict=True):
+            if end not in known or dur < known[end][0]:
+                known[end] = (int(dur), float(value))
         last = max(known)
-        rows.append((filed, last, known[last]))
+        rows.append((filed, last, known[last][1]))
     return pd.DataFrame(rows, columns=LATEST_COLUMNS)
 
 
+def first_versions(facts: pd.DataFrame) -> pd.DataFrame:
+    """The earliest filed version of each (period_start, period_end), ties by accession. Feed
+    this to `discrete_quarters` and `annual_steps` so a value enters on its first report and a
+    later re-report (a 10-K repeating a quarter) cannot change when it became known."""
+    if facts.empty:
+        return facts
+    sort = ["filed", "accession"] if "accession" in facts else ["filed"]
+    return (facts.sort_values(sort, kind="stable")
+            .drop_duplicates(["period_start", "period_end"], keep="first"))
+
+
 def total_debt(long_term: pd.DataFrame, short_term: pd.DataFrame) -> pd.DataFrame:
-    """Debt per balance-sheet date. `LongTermDebt` already includes the current portion, so a
-    short-term line is added to it only when it is borrowings or commercial paper."""
+    """Debt per balance-sheet date, as facts-shaped rows. A row is emitted at each component's
+    first filing: the line filed first alone, then (when the other line arrives later) the sum.
+    `LongTermDebt` already includes the current portion, so a short-term line is added to it
+    only when it is borrowings or commercial paper; otherwise the short line is ignored and does
+    not delay `filed`. A date can therefore have two rows: pass the result to
+    `instant_steps(..., keep_updates=True)` so the later, complete value replaces the first."""
     cols = ["period_end", "value", "filed", "tag"]
     lt = _first_reports(long_term)[cols] if len(long_term) else pd.DataFrame(columns=cols)
     st = _first_reports(short_term)[cols] if len(short_term) else pd.DataFrame(columns=cols)
-    if lt.empty and st.empty:
-        return pd.DataFrame({"period_start": pd.Series(dtype=_DT), "period_end": pd.Series(dtype=_DT),
-                             "value": pd.Series(dtype="float64"), "filed": pd.Series(dtype=_DT)})
+    rows = []
     m = lt.merge(st, on="period_end", how="outer", suffixes=("_l", "_s"))
-    overlap = (m["tag_l"] == TOTAL_DEBT_TAG) & ~m["tag_s"].isin(SEPARATE_SHORT_TAGS)
-    short = m["value_s"].astype("float64").fillna(0).where(~overlap, 0.0)
-    value = m["value_l"].astype("float64").fillna(0) + short
-    filed = pd.concat([pd.to_datetime(m["filed_l"]), pd.to_datetime(m["filed_s"])], axis=1).max(axis=1)
-    return pd.DataFrame({"period_start": pd.Series(pd.NaT, index=m.index, dtype=_DT),
-                         "period_end": pd.to_datetime(m["period_end"]).astype(_DT),
-                         "value": value, "filed": filed.astype(_DT)})
+    for r in m.itertuples():
+        has_l, has_s = pd.notna(r.value_l), pd.notna(r.value_s)
+        if has_l and has_s and r.tag_l == TOTAL_DEBT_TAG and r.tag_s not in SEPARATE_SHORT_TAGS:
+            rows.append((r.period_end, float(r.value_l), r.filed_l))
+        elif has_l and has_s:
+            first, second = sorted([(r.filed_l, float(r.value_l)), (r.filed_s, float(r.value_s))])
+            total = float(r.value_l) + float(r.value_s)
+            if first[0] < second[0]:
+                rows.append((r.period_end, first[1], first[0]))
+            rows.append((r.period_end, total, second[0]))
+        elif has_l:
+            rows.append((r.period_end, float(r.value_l), r.filed_l))
+        else:
+            rows.append((r.period_end, float(r.value_s), r.filed_s))
+    out = pd.DataFrame(rows, columns=["period_end", "value", "filed"])
+    out.insert(0, "period_start", pd.Series(pd.NaT, index=out.index, dtype=_DT))
+    out["period_end"] = pd.to_datetime(out["period_end"]).astype(_DT)
+    out["filed"] = pd.to_datetime(out["filed"]).astype(_DT)
+    out["value"] = out["value"].astype("float64")
+    return out.sort_values(["filed", "period_end"], kind="stable").reset_index(drop=True)
 
 
 def sum_periods(a: pd.DataFrame, b: pd.DataFrame) -> pd.DataFrame:
@@ -197,17 +245,28 @@ def sum_periods(a: pd.DataFrame, b: pd.DataFrame) -> pd.DataFrame:
 
 
 def add_missing_periods(primary: pd.DataFrame, extra: pd.DataFrame) -> pd.DataFrame:
-    """`primary` plus the rows of `extra` whose period is not already in it."""
+    """`primary` plus the rows of `extra` that were known before `primary` knew the period: a row
+    is kept when no primary row for that quarter (ends within SAME_QUARTER_DAYS) was filed at or
+    before it. The primary row later replaces the value at its own filing (`quarter_steps`
+    treats ends within SAME_QUARTER_DAYS as one quarter). Ends are not snapped here: that would
+    depend on primary rows filed after the extra row."""
     if extra.empty:
         return primary
     ends = primary["period_end"].to_numpy()
-    keep = [not np.any(np.abs((ends - e) / np.timedelta64(1, "D")) <= SAME_QUARTER_DAYS)
-            for e in extra["period_end"].to_numpy()]
+    pfiled = primary["filed"].to_numpy()
+    keep = []
+    for e, f in zip(extra["period_end"].to_numpy(), extra["filed"].to_numpy(), strict=True):
+        near = np.abs((ends - e) / np.timedelta64(1, "D")) <= SAME_QUARTER_DAYS
+        keep.append(not near.any() or bool(f < pfiled[near].min()))
     return pd.concat([primary, extra[keep][primary.columns]], ignore_index=True)
 
 
 def fallback_ends(facts: pd.DataFrame, fallback_tags: Iterable[str]) -> frozenset:
-    """Period ends whose value came from a summed fallback row (companyfacts._fallback_rows)."""
+    """Period ends whose first-filed version (per period, ties by accession) is a summed or
+    fallback row (companyfacts._fallback_rows). Later versions do not change the answer."""
+    if facts.empty:
+        return frozenset()
     tags = set(fallback_tags)
-    mask = facts["tag"].str.contains("+", regex=False) | facts["tag"].isin(tags)
-    return frozenset(facts.loc[mask, "period_end"])
+    first = first_versions(facts)
+    mask = first["tag"].str.contains("+", regex=False) | first["tag"].isin(tags)
+    return frozenset(first.loc[mask, "period_end"])
