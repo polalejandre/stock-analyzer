@@ -326,3 +326,20 @@ def test_debt_overlap_with_short_line_first_is_truncation_invariant():
     assert d["value"].tolist() == [10, 100]
     assert d["filed"].tolist() == [T("2020-02-15"), T("2021-02-15")]
     _assert_invariant(total_debt, [ltd, cur], ["2020-02-15", "2020-06-01", "2021-02-15"])
+
+
+def test_combine_reports_the_filing_of_the_quarter_step_used():
+    q = quarter_steps(QUARTERS.iloc[:4])
+    a = annual_steps(_facts([("2024-01-01", "2024-12-31", 500, "2025-02-20")]))
+    c = combine_ttm(q, a).set_index("filed")
+    last_q = q["filed"].max()
+    assert c.loc[T("2025-02-20"), "q_filed"] == last_q           # annual step adds no quarter
+    assert c.loc[last_q, "q_filed"] == last_q
+    assert combine_ttm(quarter_steps(QUARTERS.iloc[:0]), a)["q_filed"].isna().all()
+
+
+def test_instant_value_filed_ignores_older_dates_first_reported_later():
+    f = _facts([(None, "2023-12-31", 100, "2024-02-01"), (None, "2023-06-30", 90, "2025-03-01")])
+    s = instant_steps(f).set_index("filed")
+    assert s.loc[T("2025-03-01"), "period_end"] == T("2023-12-31")
+    assert s.loc[T("2025-03-01"), "value_filed"] == T("2024-02-01")

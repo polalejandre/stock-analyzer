@@ -1,5 +1,7 @@
+import math
 
 import pandas as pd
+import pytest
 
 from analyzer.config import load_rules
 from analyzer.panel.fundamentals import load_fundamental_panels
@@ -114,7 +116,8 @@ def test_panels_are_truncation_invariant(tmp_path):
     conn = _db(tmp_path)
     _quarters(conn, "revenue", "us-gaap:Revenues", [10, 11, 12, 13, 14, 15])
     _quarters(conn, "net_income", "us-gaap:NetIncomeLoss", [1, 2, 3, 4, 5, 6])
-    _quarters(conn, "net_interest_income", "us-gaap:InterestIncomeExpenseNet", [7, 7, 7, 7])
+    _quarters(conn, "net_interest_income", "us-gaap:InterestIncomeExpenseNet", [7, 7, 7, 7, 8, 8])
+    _quarters(conn, "noninterest_income", "us-gaap:NoninterestIncome", [3, 3, 3, 3, 4, 4])
     _quarters(conn, "stockholders_equity", "us-gaap:StockholdersEquity", [50, 55, 60, 65, 70, 75])
     _fact(conn, "long_term_debt", "us-gaap:LongTermDebt", None, "2020-03-31", 30.0, "2020-05-01")
     _fact(conn, "short_term_debt", "us-gaap:DebtCurrent", None, "2020-03-31", 5.0, "2020-08-01")
@@ -145,3 +148,72 @@ def test_panels_are_truncation_invariant(tmp_path):
 
     assert_truncation_invariant(compute, ["2020-06-15", "2020-09-01", "2020-12-01",
                                           "2021-03-15", "2021-09-01"])
+
+
+def test_quarter_fields_age_on_their_own_filing(tmp_path):
+    conn = _db(tmp_path)
+    _quarters(conn, "revenue", "us-gaap:Revenues", [10, 10, 10, 10])   # last filed 2021-02-01
+    for year in (2021, 2022, 2023):                                     # 10-Ks, no new quarter
+        _fact(conn, "revenue", "us-gaap:Revenues", f"{year}-01-01", f"{year}-12-31", 50,
+              f"{year + 1}-02-15")
+    dates = pd.bdate_range("2021-03-01", "2024-03-05")
+    f = load_fundamental_panels(conn, _entities(), dates, RULES)
+    assert f["revenue_q0"]["AAA"].loc["2021-03-01"] == 10
+    for name in ("revenue_q0", "revenue_q0_ly", "revenue_q1", "revenue_q1_ly"):
+        assert math.isnan(f[name]["AAA"].loc["2024-03-01"])
+    assert f["revenue_ttm"]["AAA"].loc["2024-03-01"] == 50
+
+
+def test_instant_fields_age_on_their_own_filing(tmp_path):
+    conn = _db(tmp_path)
+    _fact(conn, "stockholders_equity", "us-gaap:StockholdersEquity", None, "2020-12-31", 100.0,
+          "2021-02-01")
+    # an older balance-sheet date first reported years later must not refresh the value
+    _fact(conn, "stockholders_equity", "us-gaap:StockholdersEquity", None, "2020-06-30", 90.0,
+          "2023-03-01")
+    f = load_fundamental_panels(conn, _entities(), pd.bdate_range("2023-03-01", "2023-03-10"), RULES)
+    assert f["equity"]["AAA"].isna().all()
+
+
+def test_equity_avg_is_mean_of_recent_balance_sheets(tmp_path):
+    conn = _db(tmp_path)
+    for end, v, filed in [("2020-03-31", 100.0, "2020-05-01"), ("2020-06-30", 110.0, "2020-08-01"),
+                          ("2020-09-30", 120.0, "2020-11-01")]:
+        _fact(conn, "stockholders_equity", "us-gaap:StockholdersEquity", None, end, v, filed)
+    f = load_fundamental_panels(conn, _entities(), pd.bdate_range("2020-11-02", periods=3), RULES)
+    assert f["equity"]["AAA"].tolist() == [120.0] * 3
+    assert f["equity_avg"]["AAA"].tolist() == pytest.approx([110.0] * 3)
+
+
+def test_diluted_shares_not_double_adjusted_for_split_before_filing(tmp_path):
+    conn = _db(tmp_path)
+    _fact(conn, "diluted_shares", "us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding",
+          "2022-01-01", "2022-03-31", 120.0, "2022-05-01")
+    conn.execute("INSERT INTO splits VALUES ('AAA', '2022-04-15', 2.0)")  # after period, before filing
+    f = load_fundamental_panels(conn, _entities(), pd.bdate_range("2022-05-02", periods=3), RULES)
+    assert f["shares"]["AAA"].tolist() == [120.0] * 3
+
+
+def test_summed_fallback_first_report_sets_flag_from_its_filing(tmp_path):
+    conn = _db(tmp_path)
+    _quarters(conn, "revenue", "us-gaap:SalesRevenueNet+us-gaap:Other", [10, 10, 10, 10])
+    dates = pd.bdate_range("2020-01-01", "2021-06-30")
+    f = load_fundamental_panels(conn, _entities(), dates, RULES)
+    flag = f["fallback"]["AAA"]
+    assert flag.loc["2020-05-01"]                       # the first summed report's filing date
+    assert not flag.loc[:"2020-04-30"].any()
+    assert flag.loc[f["revenue_ttm"]["AAA"].first_valid_index()]
+
+
+def test_failed_companies_are_counted_in_one_warning(tmp_path, caplog, monkeypatch):
+    from analyzer.panel import fundamentals
+
+    def boom(*a, **k):
+        raise RuntimeError("bad")
+
+    monkeypatch.setattr(fundamentals, "company_steps", boom)
+    with caplog.at_level("WARNING"):
+        load_fundamental_panels(_db(tmp_path), _entities(), pd.bdate_range("2020-01-01", periods=3),
+                                RULES)
+    assert any("failed for 1 of 1" in r.getMessage() and "AAA" in r.getMessage()
+               for r in caplog.records)

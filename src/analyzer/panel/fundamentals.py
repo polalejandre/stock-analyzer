@@ -1,4 +1,10 @@
-"""Daily fundamental panels: every company's step series, as-of joined onto trading dates."""
+"""Daily fundamental panels: every company's step series, as-of joined onto trading dates.
+
+Every dynamic field ages on the filing date of the value it shows. `first_filed`, `has_property`
+and `has_us_gaap` are static per-company facts computed from all facts, not point-in-time: they
+are used only as coarse classification (is it a REIT, a US-GAAP filer, how old is the filer),
+which does not move once true, so they are not truncation-invariant by design.
+"""
 
 from __future__ import annotations
 
@@ -123,12 +129,13 @@ def _fresh(steps: pd.DataFrame, idx: np.ndarray, dates: pd.DatetimeIndex, column
     return (idx >= 0) & (age <= max_age_days)
 
 
-def _split_adjusted(steps: pd.DataFrame, splits: list[tuple[pd.Timestamp, float]]) -> pd.DataFrame:
+def _split_adjusted(steps: pd.DataFrame, splits: list[tuple[pd.Timestamp, float]],
+                    basis: str = "period_end") -> pd.DataFrame:
     """Share counts are on the basis of their own date; stored closes are on the basis of the
     latest download. Multiply each count by every split after its date (see market_cap.py)."""
     if steps.empty or not splits:
         return steps
-    factor = [float(np.prod([r for d, r in splits if d > end] or [1.0])) for end in steps["period_end"]]
+    factor = [float(np.prod([r for d, r in splits if d > end] or [1.0])) for end in steps[basis]]
     return steps.assign(value=steps["value"] * np.array(factor))
 
 
@@ -146,7 +153,7 @@ def _company_columns(steps: dict[str, pd.DataFrame], dates: pd.DatetimeIndex,
         if prefix == "revenue":
             for q in ("q0", "q0_ly", "q1", "q1_ly"):
                 qv, qidx = _asof(s, dates, q)
-                cols[f"revenue_{q}"] = np.where(_fresh(s, qidx, dates, "filed", rules.ttm_max_age_days),
+                cols[f"revenue_{q}"] = np.where(_fresh(s, qidx, dates, "q_filed", rules.ttm_max_age_days),
                                                 qv, np.nan)
         if prefix in FLAGGED and not s.empty:
             a, _ = _asof(s.assign(annual=s["annual"].astype(float)), dates, "annual")
@@ -156,12 +163,12 @@ def _company_columns(steps: dict[str, pd.DataFrame], dates: pd.DatetimeIndex,
     for name in ("equity", "cash", "debt"):
         s = steps[name]
         values, idx = _asof(s, dates, "value")
-        cols[name] = np.where(_fresh(s, idx, dates, "filed", rules.ttm_max_age_days), values, np.nan)
+        cols[name] = np.where(_fresh(s, idx, dates, "value_filed", rules.ttm_max_age_days), values, np.nan)
         if name == "equity":
             avg, _ = _asof(s, dates, "avg5")
             cols["equity_avg"] = np.where(np.isnan(cols["equity"]), np.nan, avg)
     cover = _split_adjusted(steps["shares_cover"], splits)
-    diluted = _split_adjusted(steps["shares_diluted"], splits)
+    diluted = _split_adjusted(steps["shares_diluted"], splits, basis="filed")
     cv, cidx = _asof(cover, dates, "value")
     dv, didx = _asof(diluted, dates, "value")
     c_ok = _fresh(cover, cidx, dates, "period_end", rules.shares_max_age_days)
@@ -187,6 +194,7 @@ def load_fundamental_panels(conn, entities: pd.DataFrame, dates: pd.DatetimeInde
         "'net_interest_income') GROUP BY cik").fetchall())
 
     symbols = list(entities.index)
+    failed: list[str] = []
     data: dict[str, dict[str, np.ndarray]] = {n: {} for n in (*FIELDS, *FLAGS)}
     first_filed, has_property, has_gaap = {}, {}, {}
     for n, symbol in enumerate(symbols, 1):
@@ -200,6 +208,7 @@ def load_fundamental_panels(conn, entities: pd.DataFrame, dates: pd.DatetimeInde
                                     splits.get(symbol, []), rules)
         except Exception:  # one unreadable company must not stop the run; it is counted as missing
             log.exception("fundamentals for %s (CIK %d) failed", symbol, cik)
+            failed.append(symbol)
             continue
         for name, values in cols.items():
             data[name][symbol] = values
@@ -210,6 +219,9 @@ def load_fundamental_panels(conn, entities: pd.DataFrame, dates: pd.DatetimeInde
         if n % 200 == 0:
             log.info("fundamentals: %d/%d symbols", n, len(symbols))
 
+    if failed:
+        log.warning("fundamentals failed for %d of %d symbols, e.g. %s",
+                    len(failed), len(symbols), ", ".join(failed[:5]))
     frames = {}
     for name in FIELDS:
         frames[name] = pd.DataFrame(data[name], index=dates).reindex(columns=symbols).astype("float32")

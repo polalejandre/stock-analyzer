@@ -26,14 +26,14 @@ _DT = "datetime64[ns]"
 QUARTER_COLUMNS = ["filed", "period_end", "ttm", "q0", "q0_ly", "q1", "q1_ly", "fallback"]
 ANNUAL_COLUMNS = ["filed", "period_end", "ttm", "fallback"]
 TTM_COLUMNS = ["filed", "value_filed", "period_end", "ttm", "q0", "q0_ly", "q1", "q1_ly",
-               "fallback", "annual"]
-INSTANT_COLUMNS = ["filed", "period_end", "value", "avg5"]
+               "fallback", "annual", "q_filed"]
+INSTANT_COLUMNS = ["filed", "period_end", "value", "avg5", "value_filed"]
 LATEST_COLUMNS = ["filed", "period_end", "value"]
 PERIOD_COLUMNS = ["period_start", "period_end", "value", "filed", "days", "derived"]
 
 
 def _empty(columns: list[str]) -> pd.DataFrame:
-    dates = {"filed", "value_filed", "period_end", "period_start"}
+    dates = {"filed", "value_filed", "q_filed", "period_end", "period_start"}
     bools = {"fallback", "annual", "derived"}
     return pd.DataFrame({c: pd.Series(dtype=_DT if c in dates else bool if c in bools
                                       else "int64" if c == "days" else "float64")
@@ -96,7 +96,9 @@ def annual_steps(facts: pd.DataFrame, fallback_ends: frozenset = frozenset()) ->
 def combine_ttm(qsteps: pd.DataFrame, asteps: pd.DataFrame) -> pd.DataFrame:
     """At every filing date of either series: the quarterly TTM when its latest quarter ends no
     earlier than the latest fiscal year known, otherwise the annual value (`annual` = True).
-    `value_filed` is when the value used was filed, for the age limit."""
+    `value_filed` is when the value used was filed, for the age limit. `q_filed` is when the
+    quarter step behind q0..q1_ly was filed (NaT when none): the quarter fields age on it, as an
+    annual filing adds a step without adding a quarter."""
     filed = sorted(set(qsteps["filed"]) | set(asteps["filed"]))
     if not filed:
         return _empty(TTM_COLUMNS)
@@ -129,6 +131,7 @@ def combine_ttm(qsteps: pd.DataFrame, asteps: pd.DataFrame) -> pd.DataFrame:
         "fallback": np.where(use_annual, aa["a_fallback"].astype("boolean").fillna(False),
                              qq["fallback"].astype("boolean").fillna(False)).astype(bool),
         "annual": use_annual.to_numpy(dtype=bool),
+        "q_filed": pd.to_datetime(qq["q_filed"]).astype(_DT),
     })
     return out[TTM_COLUMNS]
 
@@ -143,7 +146,9 @@ def _first_reports(facts: pd.DataFrame) -> pd.DataFrame:
 def instant_steps(facts: pd.DataFrame, keep_updates: bool = False) -> pd.DataFrame:
     """Balance-sheet values per filing. By default a date keeps its first report (later
     restatements are ignored). `keep_updates=True` lets every row update its date in filing
-    order; `total_debt` output needs it, as its rows are first filings of its components."""
+    order; `total_debt` output needs it, as its rows are first filings of its components.
+    `value_filed` is when the value shown (latest period end) was last filed: the age limit uses
+    it, since a batch that only first-reports an older date must not refresh a stale value."""
     if keep_updates:
         d = facts[facts["period_start"].isna()].sort_values(
             ["filed", "accession"] if "accession" in facts else ["filed"])
@@ -152,13 +157,16 @@ def instant_steps(facts: pd.DataFrame, keep_updates: bool = False) -> pd.DataFra
     if d.empty:
         return _empty(INSTANT_COLUMNS)
     known: dict[pd.Timestamp, float] = {}
+    when: dict[pd.Timestamp, pd.Timestamp] = {}
     rows = []
     for filed, batch in d.groupby("filed", sort=True):
         for end, value in zip(batch["period_end"], batch["value"], strict=True):
             known[end] = float(value)
+            when[end] = filed
         last = max(known)
         recent = [e for e in sorted(known)[-5:] if (last - e).days <= AVG_WINDOW_DAYS]
-        rows.append((filed, last, known[last], float(np.mean([known[e] for e in recent]))))
+        rows.append((filed, last, known[last], float(np.mean([known[e] for e in recent])),
+                     when[last]))
     return pd.DataFrame(rows, columns=INSTANT_COLUMNS)
 
 
