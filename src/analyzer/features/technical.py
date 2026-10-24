@@ -17,18 +17,23 @@ def rsi(close: pd.DataFrame, n: int) -> pd.DataFrame:
     gain = delta.clip(lower=0).ewm(alpha=1 / n, adjust=False, min_periods=n).mean()
     loss = (-delta).clip(lower=0).ewm(alpha=1 / n, adjust=False, min_periods=n).mean()
     out = 100 - 100 / (1 + gain / loss)
-    return out.where(loss > 0, 100.0).where(gain.notna())
+    out = out.where(loss > 0, 100.0).where((gain > 0) | (loss > 0), 50.0)
+    return out.where(gain.notna() & close.notna())
 
 
 def atr(high: pd.DataFrame, low: pd.DataFrame, close: pd.DataFrame, n: int) -> pd.DataFrame:
     prev = close.shift(1)
     tr = np.fmax(np.fmax(high - low, (high - prev).abs()), (low - prev).abs())
-    return tr.ewm(alpha=1 / n, adjust=False, min_periods=n).mean()
+    out = tr.ewm(alpha=1 / n, adjust=False, min_periods=n).mean()
+    return out.where(close.notna())
 
 
 def confirmed_lows(low: pd.DataFrame, k: int) -> pd.DataFrame:
-    span = 2 * k + 1
-    is_low = low.eq(low.rolling(span, center=True, min_periods=span).min())
+    """Swing low: strictly below the k bars before, at or below the k bars after (so a double
+    bottom gives one pivot, the first). Known k bars later."""
+    left = low.rolling(k, min_periods=k).min().shift(1)
+    right = low.rolling(k, min_periods=k).min().shift(-k)
+    is_low = (low < left) & (low <= right)
     return is_low.shift(k, fill_value=False).astype(bool)
 
 
@@ -78,13 +83,14 @@ def bullish_divergence(pairs: PivotPairs, lookback: int) -> pd.DataFrame:
 
 
 def reclaimed_support(close: pd.DataFrame, pairs: PivotPairs, bars: int) -> pd.DataFrame:
-    """A lower swing low broke the previous one, and the close is back above that old level
-    after being at or below it within the last `bars` days."""
-    level = pairs.prev_price
-    broken = pairs.last_price < level
-    below = (close <= level).astype(float)
-    recently_below = below.shift(1).rolling(bars, min_periods=1).max() > 0
-    return (broken & (close > level) & recently_below).astype(bool)
+    """A close broke below the latest confirmed swing low (known that day), and within the next
+    `bars` days a close is back above that same level."""
+    level = pairs.last_price
+    broke = close < level
+    out = pd.DataFrame(False, index=close.index, columns=close.columns)
+    for d in range(1, bars + 1):
+        out |= broke.shift(d, fill_value=False) & (close > level.shift(d))
+    return out.astype(bool)
 
 
 def weekly_usable_dates(index: pd.DatetimeIndex) -> pd.Series:

@@ -73,10 +73,60 @@ def test_weekly_usable_dates_start_next_week():
 
 
 def test_weekly_bar_waits_for_next_week():
-    closes = random_walk(["A", "B"], n=600, seed=11)
+    closes = random_walk(["A", "B"], n=600, seed=1)
+    full = weekly_divergence(closes, closes, F)
     wednesdays = [d for d in closes.index[300:] if d.dayofweek == 2][:3]
+    for d in wednesdays:                       # the test must exercise real divergences
+        assert full.loc[d - pd.Timedelta(days=21):d].any().any()
     assert_truncation_invariant(
         lambda end: weekly_divergence(cut(closes, end), cut(closes, end), F), wednesdays)
+
+
+def test_partial_final_week_does_not_complete_a_divergence():
+    closes = random_walk(["A"], n=300, seed=1)
+    monday = pd.Timestamp("2018-06-11")
+    wednesday = pd.Timestamp("2018-06-06")
+    friday = pd.Timestamp("2018-06-08")
+    assert monday in closes.index and wednesday in closes.index
+    div = lambda end: weekly_divergence(cut(closes, end), cut(closes, end), F)["A"]  # noqa: E731
+    assert not div(wednesday).iloc[-1]
+    assert not div(friday).iloc[-1]
+    assert div(monday).iloc[-1]                # the finished week is usable from the next Monday
+
+
+def test_quick_reclaim_after_break():
+    low = pd.DataFrame({"A": [20.0, 18, 15, 12, 11, 10, 13, 16, 17, 16, 15, 14, 13, 12, 9,
+                              11, 12, 13, 14]})
+    k = 2
+    pairs = pivot_pairs(low, low, confirmed_lows(low, k), k)
+    rec = reclaimed_support(low, pairs, bars=10)
+    assert not rec["A"].iloc[14]
+    assert rec["A"].iloc[15]                   # first close back above 10 after the break at 14
+
+
+def test_reclaim_after_window_and_no_break():
+    low = pd.DataFrame({"A": [20.0, 18, 15, 12, 11, 10, 13, 16, 17, 16, 15, 14, 13, 12, 9]
+                        + [9.0] * 12 + [11.0, 12.0]})
+    k = 2
+    pairs = pivot_pairs(low, low, confirmed_lows(low, k), k)
+    rec = reclaimed_support(low, pairs, bars=10)
+    assert not rec["A"].iloc[-2:].any()        # break at 14, reclaim at 27: more than 10 bars
+    flat = pd.DataFrame({"A": [20.0, 18, 15, 12, 11, 10, 13, 16, 17, 18, 19, 20, 21, 22]})
+    pairs = pivot_pairs(flat, flat, confirmed_lows(flat, k), k)
+    assert not reclaimed_support(flat, pairs, bars=10)["A"].any()
+
+
+def test_double_bottom_gives_one_pivot():
+    low = pd.DataFrame({"A": [5.0, 4, 3, 2, 2, 3, 4, 5, 6]})
+    assert confirmed_lows(low, 2)["A"].sum() == 1
+
+
+def test_rsi_flat_is_fifty_and_nan_after_last_price():
+    flat = pd.DataFrame({"A": [10.0] * 30})
+    assert rsi(flat, 14)["A"].iloc[-1] == 50.0
+    c = pd.DataFrame({"A": list(np.arange(1.0, 31.0)) + [np.nan] * 3})
+    assert rsi(c, 14)["A"].iloc[-3:].isna().all()
+    assert atr(c + 1, c - 1, c, 14)["A"].iloc[-3:].isna().all()
 
 
 def test_daily_features_are_truncation_invariant():
@@ -85,6 +135,6 @@ def test_daily_features_are_truncation_invariant():
     p = make_price_panels(random_walk(["A", "B"], n=300, seed=12))
     def t(end):
         r = technical(cut(p, end), F)
-        return {"rsi": r.rsi, "atr": r.atr, "div": r.divergence, "rec": r.reclaimed}
+        return {"rsi": r.rsi, "atr": r.atr, "ma": r.ma, "div": r.divergence, "rec": r.reclaimed}
 
     assert_truncation_invariant(t, [p.dates[120], p.dates[250]])
