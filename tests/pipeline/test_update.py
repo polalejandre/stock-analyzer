@@ -179,9 +179,9 @@ def test_step_universe_does_not_screen_young_listings(ctx, screen):
                          (snapshot_date,))
     result = step_universe(ctx)
     assert screen == ["refresh_tickers"]  # no screen here: index prices are not stored yet
-    assert result.attempted == 2 * len(INDEXES) + 1
+    assert result.attempted == 2 * len(INDEXES) + 1 + 1  # + aliases
     assert result.failed == []
-    assert result.detail == "tickers=7"
+    assert result.detail == "tickers=7 aliases=0 recycled=0 excluded=0"
     assert result.latest_data_date == date(2026, 10, 9)  # the newest snapshot actually stored
 
 
@@ -206,9 +206,9 @@ def test_step_universe_one_failing_index_does_not_skip_the_other(ctx, screen, mo
     assert synced == list(INDEXES)
     assert result.failed == [(INDEXES[0], "RuntimeError: wikipedia 503"),
                              ("sp400 2026-09-01", "bad table")]
-    assert result.attempted == 1 + 3 + 1  # the failed index, the other index, the ticker map
+    assert result.attempted == 1 + 3 + 1 + 1  # failed index, other index, ticker map, aliases
     assert result.phase_failed and not result.healthy
-    assert result.detail == "tickers=7"  # the rest of the step still ran
+    assert result.detail == "tickers=7 aliases=0 recycled=0 excluded=0"  # the rest of the step still ran
 
 
 def test_young_screen_runs_after_prices_are_synced(ctx, screen):
@@ -866,6 +866,6 @@ def test_step_universe_lists_given_up_months_without_counting_them(ctx, screen, 
     monkeypatch.setattr(update, "sync_index_snapshots", lambda conn, wiki, name, today: SnapshotSync(
         attempted=1, skipped=[f"{name} 2013-04-01"] if name == "sp500" else []))
     result = step_universe(ctx)
-    assert result.attempted == len(INDEXES) + 1
+    assert result.attempted == len(INDEXES) + 1 + 1  # + aliases
     assert result.failed == [] and result.healthy
-    assert result.detail == "tickers=7 skipped_months=[sp500 2013-04-01]"
+    assert result.detail == "tickers=7 aliases=0 recycled=0 excluded=0 skipped_months=[sp500 2013-04-01]"
