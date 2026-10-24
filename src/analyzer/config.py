@@ -188,6 +188,15 @@ class ResearchRules:
 
 
 @dataclass(frozen=True)
+class RegimeRules:
+    loose_min: int
+    tight_max: int
+    median_window: int
+    change_window: int
+    yoy_window: int
+
+
+@dataclass(frozen=True)
 class Rules:
     version: str
     universe: UniverseRules
@@ -197,6 +206,7 @@ class Rules:
     variants: VariantRules
     plans: PlanRules
     research: ResearchRules
+    regime: RegimeRules
 
 
 def _section(cls, table: dict, name: str, nested: dict | None = None):
@@ -229,4 +239,5 @@ def load_rules(path: Path = PROJECT_ROOT / "rules.toml") -> Rules:
         variants=variants,
         plans=_section(PlanRules, data["plans"], "plans"),
         research=_section(ResearchRules, data["research"], "research"),
+        regime=_section(RegimeRules, data["regime"], "regime"),
     )

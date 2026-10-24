@@ -120,6 +120,15 @@ def test_phase2_rules_load():
     assert rules.score.tier_a == 75
 
 
+def test_regime_rules_load():
+    rules = load_rules(PROJECT_ROOT / "rules.toml")
+    assert rules.regime.loose_min == 4
+    assert rules.regime.tight_max == 2
+    assert rules.regime.median_window == 756
+    assert rules.regime.change_window == 65
+    assert rules.regime.yoy_window == 252
+
+
 def test_unknown_rule_key_is_rejected(tmp_path):
     text = (PROJECT_ROOT / "rules.toml").read_text().replace(
         "cooldown_days = 42", "cooldown_days = 42\ncooldwn_days = 1")

@@ -8,6 +8,9 @@ from __future__ import annotations
 
 import pandas as pd
 
+from analyzer.config import RegimeRules
+
+# Facts about FRED publication schedules, not tunable thresholds, so they stay in code.
 PUBLICATION_LAG_DAYS = {
     "WALCL": 7,          # weekly, Wednesday level, published Thursday
     "RRPONTSYD": 1,      # daily
@@ -16,8 +19,6 @@ PUBLICATION_LAG_DAYS = {
     "BAMLH0A0HYM2": 1,   # daily
     "DFII10": 1,         # daily
 }
-YEARS3 = 756   # trading days
-WEEKS13 = 65
 
 
 def load_macro(conn, dates: pd.DatetimeIndex) -> pd.DataFrame:
@@ -35,27 +36,39 @@ def load_macro(conn, dates: pd.DatetimeIndex) -> pd.DataFrame:
     return out
 
 
-def regime(macro: pd.DataFrame) -> pd.Series:
-    hy, real = macro["BAMLH0A0HYM2"], macro["DFII10"]
-    indicators = pd.DataFrame({
-        "nfci": macro["NFCI"] < 0,
-        "hy": hy < hy.rolling(YEARS3, min_periods=YEARS3).median(),
-        "fed": macro["WALCL"] - macro["WALCL"].shift(WEEKS13) > 0,
-        "m2": macro["M2SL"] / macro["M2SL"].shift(252) - 1 > 0,
-        "rrp": macro["RRPONTSYD"] < macro["RRPONTSYD"].shift(WEEKS13),
-        "real": real < real.rolling(YEARS3, min_periods=YEARS3).median(),
-    })
-    known = pd.DataFrame({
-        "nfci": macro["NFCI"].notna(),
-        "hy": hy.rolling(YEARS3, min_periods=YEARS3).median().notna() & hy.notna(),
-        "fed": macro["WALCL"].shift(WEEKS13).notna(),
-        "m2": macro["M2SL"].shift(252).notna(),
-        "rrp": macro["RRPONTSYD"].shift(WEEKS13).notna(),
-        "real": real.rolling(YEARS3, min_periods=YEARS3).median().notna() & real.notna(),
-    })
+# Each helper returns (indicator, known): indicator is True when the series is "loose",
+# known is True when the indicator can be computed on that date.
+
+def _below_threshold(x: pd.Series, value: float) -> tuple[pd.Series, pd.Series]:
+    return x < value, x.notna()
+
+
+def _below_rolling_median(x: pd.Series, window: int) -> tuple[pd.Series, pd.Series]:
+    median = x.rolling(window, min_periods=window).median()
+    return x < median, median.notna() & x.notna()
+
+
+def _moved_over(x: pd.Series, window: int, direction: int) -> tuple[pd.Series, pd.Series]:
+    """Loose when the level moved up (direction +1) or down (-1) over `window` days.
+    For a positive series a relative change and the plain difference have the same sign."""
+    change = x - x.shift(window)
+    return direction * change > 0, change.notna()
+
+
+def regime(macro: pd.DataFrame, rules: RegimeRules) -> pd.Series:
+    parts = {
+        "nfci": _below_threshold(macro["NFCI"], 0.0),
+        "hy": _below_rolling_median(macro["BAMLH0A0HYM2"], rules.median_window),
+        "fed": _moved_over(macro["WALCL"], rules.change_window, +1),
+        "m2": _moved_over(macro["M2SL"], rules.yoy_window, +1),
+        "rrp": _moved_over(macro["RRPONTSYD"], rules.change_window, -1),
+        "real": _below_rolling_median(macro["DFII10"], rules.median_window),
+    }
+    indicators = pd.DataFrame({k: v[0] for k, v in parts.items()}, index=macro.index)
+    known = pd.DataFrame({k: v[1] for k, v in parts.items()}, index=macro.index)
     loose = indicators.sum(axis=1)
     out = pd.Series("neutral", index=macro.index)
-    out[loose >= 4] = "loose"
-    out[loose <= 2] = "tight"
+    out[loose >= rules.loose_min] = "loose"
+    out[loose <= rules.tight_max] = "tight"
     out[~known.all(axis=1)] = "unknown"
     return out

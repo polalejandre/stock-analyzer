@@ -1,6 +1,6 @@
 # Every threshold and weight used by the engine. Bump `version` whenever any value changes.
 # Phase-2 values are starting values; they are tuned on the in-sample period only (spec 9.2).
-version = "2026.10.24-2"
+version = "2026.10.24-3"
 
 [universe]
 min_dollar_volume = 25_000_000      # average close × volume over `dollar_volume_days`, USD
@@ -102,3 +102,10 @@ bootstrap_seed = 7
 min_events = 100
 min_win_rate = 0.55
 win_basis = "excess_spy"            # a win is a 63-day return above SPY's over the same days
+
+[regime]
+loose_min = 4                      # at least this many of the six indicators loose = "loose"
+tight_max = 2                      # at most this many loose = "tight"; between the two = "neutral"
+median_window = 756                # trading days (3 years) for the rolling median of a level
+change_window = 65                 # trading days (13 weeks) for a change in a level
+yoy_window = 252                   # trading days (1 year) for the M2 year-over-year change
