@@ -108,3 +108,86 @@ def test_simulate_plans_two_symbols_with_trap_frame():
     assert b_row["swing_outcome"] == "time" and b_row["swing_days"] == P.swing_time_stop
     assert b_row["position_outcome"] == "no_plan" and b_row["position_days"] == 0
     assert np.isnan(b_row["position_r"])
+
+
+def _custom(close, open_=None, low=None):
+    idx = pd.bdate_range("2024-01-01", periods=len(close))
+    c = pd.DataFrame({"A": close}, index=idx)
+    o = c if open_ is None else pd.DataFrame({"A": open_}, index=idx)
+    lo = c if low is None else pd.DataFrame({"A": low}, index=idx)
+    return PricePanels(open=o, high=c, low=lo, close=c, adj_close=c,
+                       volume=pd.DataFrame(1e6, index=idx, columns=c.columns))
+
+
+def _etfs(n, spy, xlk):
+    idx = pd.bdate_range("2024-01-01", periods=n)
+    return make_price_panels(pd.DataFrame({"SPY": spy, "XLK": xlk}, index=idx))
+
+
+def test_entry_is_open_mae_is_exact_and_ref_differs_from_spy():
+    close = np.array([10.0, 11, 12, 13, 14, 15])
+    s = _custom(close, open_=close - 0.5, low=close - 1)
+    spy = np.array([100.0, 100, 101, 102, 103, 104])
+    xlk = np.array([50.0, 50, 55, 56, 57, 58])
+    e = _etfs(6, spy, xlk)
+    ev = pd.DataFrame({"symbol": ["A"], "pos": [0]})
+    out = forward_returns(ev, s, e, {"A": "XLK"}, horizons=(2,), mae_horizon=3).iloc[0]
+    assert out["entry_price"] == 10.5
+    assert abs(out["ret_2"] - (12 / 10.5 - 1)) < 1e-12
+    assert abs(out["mae"] - (10 / 10.5 - 1)) < 1e-12
+    assert abs(out["xs_spy_2"] - (12 / 10.5 - 1 - 0.01)) < 1e-12
+    assert abs(out["xs_ref_2"] - (12 / 10.5 - 1 - 0.1)) < 1e-12
+    assert out["xs_ref_2"] != out["xs_spy_2"]
+    assert not out["delisted_2"]
+
+
+def test_delisted_stock_exits_at_last_close_and_benchmark_runs_on():
+    n = 80
+    close = 10 + 0.1 * np.arange(n)
+    close[41:] = np.nan
+    s = _custom(close)
+    spy = 100.0 + np.arange(n)
+    e = _etfs(n, spy, spy)
+    ev = pd.DataFrame({"symbol": ["A"], "pos": [5]})
+    out = forward_returns(ev, s, e, {"A": "XLK"}, horizons=(63,), mae_horizon=10).iloc[0]
+    assert abs(out["ret_63"] - (close[40] / close[6] - 1)) < 1e-12
+    assert out["delisted_63"]
+    assert abs(out["spy_63"] - (spy[68] / spy[6] - 1)) < 1e-12
+
+
+def test_gap_at_exit_uses_last_valid_close_and_is_not_delisted():
+    n = 40
+    close = 10 + 0.1 * np.arange(n)
+    close[20] = np.nan
+    s = _custom(close)
+    e = _etfs(n, np.full(n, 100.0), np.full(n, 100.0))
+    ev = pd.DataFrame({"symbol": ["A"], "pos": [10]})
+    out = forward_returns(ev, s, e, {"A": "XLK"}, horizons=(10,), mae_horizon=5).iloc[0]
+    assert abs(out["ret_10"] - (close[19] / close[11] - 1)) < 1e-12
+    assert not out["delisted_10"]
+
+
+def test_data_ending_before_the_horizon_is_nan_for_everything():
+    n = 30
+    s = _custom(np.full(n, 10.0))
+    e = _etfs(n, np.full(n, 100.0), np.full(n, 100.0))
+    ev = pd.DataFrame({"symbol": ["A"], "pos": [5]})
+    out = forward_returns(ev, s, e, {"A": "XLK"}, horizons=(63,), mae_horizon=10).iloc[0]
+    assert np.isnan(out["ret_63"]) and np.isnan(out["spy_63"]) and not out["delisted_63"]
+
+
+def test_thesis_on_the_time_stop_day_is_a_time_exit():
+    o = c = np.full(30, 10.0)
+    plan = _plan(position_stop=7.0, position_target=20.0)
+    trap = np.zeros(30, bool)
+    trap[20] = True        # entry day 1, time stop 20 -> last holding day is 20
+    assert simulate_plan(o, c, trap, 0, plan, "position", 20)[::3] == ("time", 20)
+    trap = np.zeros(30, bool)
+    trap[19] = True
+    assert simulate_plan(o, c, trap, 0, plan, "position", 20)[0] == "thesis"
+
+
+def test_plan_on_a_series_that_ends_is_delisted():
+    o = c = np.array([10.0, 10, 11, np.nan, np.nan, np.nan])
+    outcome, price, r, days = simulate_plan(o, c, np.zeros(6, bool), 0, _plan(), "swing", 20)
+    assert (outcome, price, days) == ("delisted", 11.0, 2) and abs(r - 0.5) < 1e-12
