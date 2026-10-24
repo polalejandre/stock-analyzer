@@ -34,6 +34,13 @@ def test_in_sample_run_writes_outputs(setup):
     assert summary["groups"]["setup"]["n"] >= 1
     assert summary["verdict"]["tests"]["n"] is False          # far fewer than 100 events
     events_all = pd.read_csv(res.out_dir / "events.csv")
+    b = pd.read_csv(res.out_dir / "breakdowns.csv")
+    assert "industry" not in set(b["column"]) and {"flow", "ref_etf"} <= set(b["column"])
+    assert set(b.loc[b["column"] == "flow", "value"]) <= {"hot", "neutral", "cold", "unknown"}
+    rows = events_all[events_all.group != "dislocated_all"]
+    expect = rows["industry"].map({1.0: "hot", 0.0: "neutral", -1.0: "cold"}).fillna("unknown")
+    assert (rows["flow"] == expect).all()
+    assert events_all["ref_etf"].notna().any()
     assert events_all["regime"].notna().all()               # dislocated_all events too
     for group, share in summary["regime_known_share"].items():
         chosen = events_all[(events_all.group == group) & (events_all.period == "in_sample")]

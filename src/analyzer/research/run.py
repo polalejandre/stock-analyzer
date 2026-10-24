@@ -33,8 +33,10 @@ FROZEN_PATHS = ("rules.toml", "docs/specs/2026-10-24-phase-2-design-addendum.md"
 OOS_LOG = PROJECT_ROOT / "docs" / "research" / "oos-runs.csv"
 OOS_FIELDS = ["run_date", "run_id", "rules_version", "commit", "n", "median_xs_spy", "win_rate",
               "dislocated_median_xs_spy", "verdict", "dirty_tree"]
-BREAKDOWN_COLUMNS = ["shock", "correction", "sector", "industry", "regime", "variant", "tier",
-                     "annual", "fallback", "has_missing"]
+BREAKDOWN_COLUMNS = ["shock", "correction", "sector", "flow", "ref_etf", "regime", "variant",
+                     "tier", "annual", "fallback", "has_missing"]
+# evaluate's rows call the flow code "industry" (the industry ETF's flow); events name it
+FLOW_LABELS = {1.0: "hot", 0.0: "neutral", -1.0: "cold"}
 
 
 class GitError(RuntimeError):
@@ -113,6 +115,8 @@ def run_research(conn, rules: Rules, period: str, out_root: Path, *, panels=None
     events.loc[is_setup, "reasons"] = [" | ".join(reasons(r, rules))
                                        for r in events[is_setup].to_dict("records")]
     events["has_missing"] = events.get("missing", pd.Series(0, index=events.index)).fillna(0) > 0
+    events["flow"] = (events["industry"].map(FLOW_LABELS) if "industry" in events
+                      else pd.Series(index=events.index, dtype=object)).fillna("unknown")
     # every group (dislocated_all rows carry no regime of their own): the regime of the event day
     events["regime"] = ev.regime.reindex(pd.DatetimeIndex(events["date"])).fillna("unknown").to_numpy()
 
