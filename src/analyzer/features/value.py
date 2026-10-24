@@ -33,25 +33,50 @@ def net_debt(f: FundamentalPanels) -> pd.DataFrame:
     return debt - f["cash"].astype("float64").fillna(0.0)
 
 
+def ebitda(f: FundamentalPanels) -> pd.DataFrame:
+    return f["operating_income_ttm"].astype("float64") + f["da_ttm"].astype("float64")
+
+
 def _per(num: pd.DataFrame, den: pd.DataFrame) -> pd.DataFrame:
     den = den.astype("float64")
     return (num / den).where(den > 0)
 
 
-def ratios(close: pd.DataFrame, f: FundamentalPanels) -> dict[str, pd.DataFrame]:
-    cap = market_cap(close, f["shares"])
-    ev = cap + net_debt(f)
-    ebitda = f["operating_income_ttm"].astype("float64") + f["da_ttm"].astype("float64")
-    fcf = f["ocf_ttm"].astype("float64") - f["capex_ttm"].astype("float64")
-    ffo = f["net_income_ttm"].astype("float64") + f["da_ttm"].astype("float64")
-    return {
-        "pe": _per(cap, f["net_income_ttm"]),
-        "ev_ebitda": _per(ev, ebitda).where(ev > 0),
-        "p_fcf": _per(cap, fcf),
-        "ps": _per(cap, f["revenue_ttm"]),
-        "pb": _per(cap, f["equity"]),
-        "p_ffo": _per(cap, ffo),
-    }
+def ratios(close: pd.DataFrame, f: FundamentalPanels,
+           columns_for: Mapping[str, Sequence[str]] | None = None) -> dict[str, pd.DataFrame]:
+    """All six metrics. With `columns_for`, each metric is computed only for its own symbols
+    (metrics with no symbols are omitted); by default every metric covers every column."""
+    cap_all = market_cap(close, f["shares"])
+    nd_all = net_debt(f)
+    ebitda_all = ebitda(f)
+    fcf_all = f["ocf_ttm"].astype("float64") - f["capex_ttm"].astype("float64")
+    ffo_all = f["net_income_ttm"].astype("float64") + f["da_ttm"].astype("float64")
+
+    def part(frame: pd.DataFrame, cols) -> pd.DataFrame:
+        return frame if cols is None else frame[cols]
+
+    out: dict[str, pd.DataFrame] = {}
+    for metric in METRICS:
+        cols = None
+        if columns_for is not None:
+            cols = [c for c in columns_for.get(metric, ()) if c in close.columns]
+            if not cols:
+                continue
+        cap = part(cap_all, cols)
+        if metric == "pe":
+            out[metric] = _per(cap, part(f["net_income_ttm"], cols))
+        elif metric == "ev_ebitda":
+            ev = cap + part(nd_all, cols)
+            out[metric] = _per(ev, part(ebitda_all, cols)).where(ev > 0)
+        elif metric == "p_fcf":
+            out[metric] = _per(cap, part(fcf_all, cols))
+        elif metric == "ps":
+            out[metric] = _per(cap, part(f["revenue_ttm"], cols))
+        elif metric == "pb":
+            out[metric] = _per(cap, part(f["equity"], cols))
+        else:
+            out[metric] = _per(cap, part(ffo_all, cols))
+    return out
 
 
 def own_percentile(ratio: pd.DataFrame, window: int, min_obs: int) -> pd.DataFrame:
@@ -102,18 +127,19 @@ class ValueFeatures:
 def value_features(close: pd.DataFrame, f: FundamentalPanels, eligible: pd.DataFrame,
                    entities: pd.DataFrame, columns_for: Mapping[str, Sequence[str]],
                    rules: FeatureRules) -> ValueFeatures:
-    all_ratios = ratios(close, f)
+    """Ratios, own-history percentile and median, and peer median per metric.
+
+    `columns_for[metric]` lists the symbols whose variant uses that metric (the caller builds it
+    from all variants). Output frames for a metric hold only those columns, and the peer median
+    is taken over eligible symbols among them. Metrics with no columns are omitted."""
+    all_ratios = ratios(close, f, columns_for)
     r, pct, p50, peer = {}, {}, {}, {}
-    for metric in METRICS:
-        cols = [c for c in columns_for.get(metric, ()) if c in close.columns]
-        if not cols:
-            continue
-        x = all_ratios[metric][cols]
+    for metric, x in all_ratios.items():
         r[metric] = x.astype("float32")
         pct[metric] = own_percentile(x, rules.percentile_window, rules.percentile_min_obs).astype("float32")
         p50[metric] = x.rolling(rules.percentile_window, min_periods=rules.percentile_min_obs
                                 ).median().astype("float32")
-        # Peers: every eligible stock that uses the metric, not only this variant's columns.
+        # Peer scope: x holds exactly columns_for[metric], so the peer median is taken over the
+        # eligible symbols whose variant uses this metric (R16).
         peer[metric] = peer_median(x, eligible, entities, rules.peer_min_size).astype("float32")
-    ebitda = f["operating_income_ttm"].astype("float64") + f["da_ttm"].astype("float64")
-    return ValueFeatures(r, pct, p50, peer, market_cap(close, f["shares"]), net_debt(f), ebitda)
+    return ValueFeatures(r, pct, p50, peer, market_cap(close, f["shares"]), net_debt(f), ebitda(f))
