@@ -12,6 +12,10 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import pandas as pd
+
+from analyzer.data.edgar.merges import DEFAULT_PATH as MERGES_PATH
+from analyzer.data.edgar.merges import load_cik_merges
 from analyzer.data.http import HttpClient
 from analyzer.store.db import get_state, set_state
 from analyzer.universe.wikipedia import parse_changes, parse_constituents, revision_html
@@ -94,8 +98,18 @@ def _load_manual(path: Path) -> dict[str, str]:
     return {e["ticker"]: e["price_symbol"] for e in data.get("alias", [])}
 
 
-def build_aliases(conn, reasons: Mapping[str, str],
-                  manual_path: Path = MANUAL_PATH) -> AliasSummary:
+def _canonical_map(conn, merges_path: Path) -> dict[int, int]:
+    """Predecessor CIK -> the current CIK its history belongs to."""
+    rows = conn.execute("SELECT ticker, cik FROM tickers WHERE cik IS NOT NULL").fetchall()
+    if not rows:
+        return {}
+    ticker_map = pd.DataFrame(rows, columns=["ticker", "cik"])
+    return {p: cur for cur, preds in load_cik_merges(ticker_map, merges_path).items()
+            for p in preds}
+
+
+def build_aliases(conn, reasons: Mapping[str, str], manual_path: Path = MANUAL_PATH,
+                  merges_path: Path = MERGES_PATH) -> AliasSummary:
     """Rewrite ticker_aliases and member_fates for every ticker ever in an index."""
     priced = {r[0] for r in conn.execute("SELECT DISTINCT symbol FROM prices")}
     current_cik = {t: c for t, c in conn.execute("SELECT ticker, cik FROM tickers") if c is not None}
@@ -104,7 +118,8 @@ def build_aliases(conn, reasons: Mapping[str, str],
     for t in sorted(priced):  # deterministic: alphabetical first symbol per CIK
         if t in current_cik:
             symbol_by_cik.setdefault(int(current_cik[t]), t)
-    snaps = snapshot_ciks(conn)
+    canon_of = _canonical_map(conn, merges_path)
+    snaps = {t: {canon_of.get(c, c) for c in ciks} for t, ciks in snapshot_ciks(conn).items()}
     manual = _load_manual(manual_path)
 
     aliases: list[tuple] = []
@@ -113,18 +128,20 @@ def build_aliases(conn, reasons: Mapping[str, str],
         seen = snaps.get(t, set())
         if t in manual:
             aliases.append((t, manual[t], current_cik.get(manual[t]), "manual"))
-        elif t in priced:
-            cur = current_cik.get(t)
-            if seen and cur is not None and int(cur) not in seen:
-                target = next((symbol_by_cik[c] for c in sorted(seen) if c in symbol_by_cik), None)
-                if target is not None and target != t:
-                    aliases.append((t, target, next(iter(sorted(seen))), "cik"))
-                else:
-                    fates.append((t, "recycled", f"snapshot CIK {sorted(seen)} != price CIK {cur}"))
+        elif len(seen) > 1:  # the ticker named several companies over time
+            fates.append((t, "recycled", f"snapshot CIKs {sorted(seen)} name several companies"))
         else:
-            target = next((symbol_by_cik[c] for c in sorted(seen) if c in symbol_by_cik), None)
-            if target is not None:
-                aliases.append((t, target, next(iter(sorted(seen))), "cik"))
+            match = next((c for c in sorted(seen) if c in symbol_by_cik), None)
+            target = symbol_by_cik[match] if match is not None else None
+            if t in priced:
+                cur = current_cik.get(t)
+                if seen and cur is not None and int(cur) not in seen:
+                    if target is not None and target != t:
+                        aliases.append((t, target, match, "cik"))
+                    else:
+                        fates.append((t, "recycled", f"snapshot CIK {sorted(seen)} != price CIK {cur}"))
+            elif target is not None:
+                aliases.append((t, target, match, "cik"))
             else:
                 reason = reasons.get(t)
                 fates.append((t, classify_fate(reason), reason))

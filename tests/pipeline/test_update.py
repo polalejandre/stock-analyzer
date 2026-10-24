@@ -869,3 +869,15 @@ def test_step_universe_lists_given_up_months_without_counting_them(ctx, screen, 
     assert result.attempted == len(INDEXES) + 1 + 1  # + aliases
     assert result.failed == [] and result.healthy
     assert result.detail == "tickers=7 aliases=0 recycled=0 excluded=0 skipped_months=[sp500 2013-04-01]"
+
+
+def test_step_universe_alias_failure_is_recorded_but_keeps_other_results(ctx, screen, monkeypatch):
+    def boom(conn, wiki):
+        raise RuntimeError("alias boom")
+
+    monkeypatch.setattr(update, "sync_aliases", boom)
+    result = step_universe(ctx)
+    assert [name for name, _ in result.failed] == ["aliases"]
+    assert "alias boom" in result.failed[0][1]
+    assert result.detail.startswith("tickers=7")
+    assert result.attempted == 2 * len(INDEXES) + 1 + 1

@@ -56,3 +56,22 @@ def test_snapshot_cik_fills_a_ticker_sec_no_longer_maps(tmp_path):
                               "name": pd.Series(dtype=str), "exchange": pd.Series(dtype=str)})
     refresh_tickers(conn, empty_map, date(2026, 10, 24))
     assert conn.execute("SELECT cik FROM tickers WHERE ticker='GONE'").fetchone() == (4242,)
+
+
+def test_latest_snapshot_cik_wins_for_the_fallback(tmp_path):
+    from datetime import date
+
+    import pandas as pd
+
+    from analyzer.store.db import connect, migrate
+    from analyzer.universe.registry import refresh_tickers
+    conn = connect(tmp_path / "a.db")
+    migrate(conn)
+    for snap, cik in (("2013-01-01", 1), ("2024-01-01", 2)):
+        conn.execute("INSERT INTO index_snapshots (index_name, snapshot_date, revision_id, ticker, "
+                     "security, gics_sector, cik) VALUES ('sp500', ?, 1, 'COR', 'Co', 'Energy', ?)",
+                     (snap, cik))
+    empty_map = pd.DataFrame({"ticker": pd.Series(dtype=str), "cik": pd.Series(dtype=int),
+                              "name": pd.Series(dtype=str), "exchange": pd.Series(dtype=str)})
+    refresh_tickers(conn, empty_map, date(2026, 10, 24))
+    assert conn.execute("SELECT cik FROM tickers WHERE ticker='COR'").fetchone() == (2,)
