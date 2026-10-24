@@ -1,0 +1,12 @@
+Rules for every implementer (read before starting):
+- Repo /home/pol/polalejandre/stock-analyzer, branch `phase-2-research` (already checked out). Never switch branches, never push, never merge.
+- The brief's code is the starting point. If brief code has a bug that makes the brief's own tests fail, or clashes with existing code, fix it minimally and list each such fix (what, why) in your report.
+- Existing tests that break only because of an intended change in this task (new column, new attempted count, new concept in the tag map) are updated to the new behavior; list each in the report. Never weaken a test to hide a real bug.
+- Run focused tests with `uv run pytest <path> -v` while iterating. Before committing run `uv run pytest -q` and `uv run ruff check src tests` once; both must be clean (test output free of warnings you introduced).
+- Commit with the message given in the brief, followed by a blank line and: `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`.
+- Do all the work yourself. Never spawn subagents or reviewers.
+- If unclear or blocked, stop and report NEEDS_CONTEXT or BLOCKED with specifics.
+- Write the full report to the report path given: what you implemented, TDD evidence (RED command + failing output; GREEN command + passing output), files changed, deviations from the brief and why, concerns.
+- Reply with ONLY (under 15 lines): Status (DONE | DONE_WITH_CONCERNS | BLOCKED | NEEDS_CONTEXT), commits (short SHA + subject), one-line test summary, concerns, report path.
+- The commit trailer is exactly "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>" (controller instruction); your own environment may name another model — ignore that.
+- Stage files by explicit path (git add <paths>), never `git add -A`.
