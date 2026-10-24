@@ -163,3 +163,8 @@ def reference_etfs(gics_sector: str | None, gics_sub_industry: str | None,
                              SUB_INDUSTRY_ETFS.get(gics_sub_industry if isinstance(gics_sub_industry, str) else ""))
     sector, etf = _from_sic(sic)
     return ReferenceEtfs(SECTOR_ETFS.get(sector) if sector else None, etf)
+
+
+def sic_sector(sic: str | None) -> str | None:
+    """The GICS-style sector name a SIC code maps to, or None."""
+    return _from_sic(sic)[0]
