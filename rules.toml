@@ -1,8 +1,103 @@
 # Every threshold and weight used by the engine. Bump `version` whenever any value changes.
-version = "2026.10.10-1"
+# Phase-2 values are starting values; they are tuned on the in-sample period only (spec 9.2).
+version = "2026.10.24-1"
 
 [universe]
 min_dollar_volume = 25_000_000      # average close × volume over `dollar_volume_days`, USD
 dollar_volume_days = 20
 young_max_years = 5                 # a young listing first traded less than this many years ago
 young_min_market_cap = 2_000_000_000
+
+[features]
+high_window = 63                    # drawdown from this many trading days' high (spec 5.3)
+shock_day_drop = 0.07               # a single-day close-to-close drop this large makes a "shock"
+correction_drawdown = 0.08          # SPY this far below its 63-day high = "market correction"
+year_days = 252                     # "one year earlier" on a daily panel
+percentile_window = 1260            # own-history percentile window (5 years of trading days)
+percentile_min_obs = 756            # at least 3 years of history (spec 5.1)
+history_min_days = 1095             # first fundamentals filing at least this many days back
+peer_min_size = 8                   # industry peer group size before falling back to the sector
+ttm_max_age_days = 456              # a TTM or annual value filed longer ago is not used (~15 months)
+shares_max_age_days = 456           # same for share counts, measured from their period end
+rsi_period = 14
+atr_period = 14
+ma_period = 50
+pivot_bars = 5                      # a swing low/high is the extreme of this many bars each side
+weekly_pivot_bars = 2
+divergence_lookback = 40            # bars; both pivots of a divergence must be this recent
+weekly_divergence_lookback = 26
+reclaim_bars = 10
+rs_short = 63
+rs_long = 126
+dv_short = 20
+dv_long = 120
+hot_rank = 0.8                      # top 20% of industries by relative strength
+cold_rank = 0.2
+hot_dv_trend = 1.2
+accumulation_low = 0.8              # up/down volume ratio that scores 0
+accumulation_high = 1.4             # up/down volume ratio that scores 1
+insider_min_buyers = 2
+insider_exec_min_usd = 100_000
+
+[gates]
+max_value_percentile = 30           # gate 1: median own-history percentile at most this
+min_cheaper_metrics = 2             # gate 1: cheaper than the peer median on at least this many
+min_value_metrics = 2               # gate 1: needs at least this many usable metrics
+min_drawdown = 0.15                 # gate 2
+min_gap_vs_etf = 0.10               # gate 2: at least this much worse than the reference ETF
+margin_drop = 0.05                  # gate 3: TTM operating margin down more than this YoY
+roe_drop = 0.05                     # gate 3, financials: TTM ROE down more than this YoY
+guidance_tone_enabled = false       # left out of the first go/no-go run (addendum 2.3)
+min_reward_risk = 1.5               # gate 5
+
+[score]
+weight_value = 30
+weight_quality = 30
+weight_dislocation = 15
+weight_flow = 15
+weight_technical = 10
+insider_bonus = 5
+tier_a = 75
+tier_b = 60
+dislocation_correction_drift = 1.0
+dislocation_idiosyncratic_drift = 0.7
+flow_hot = 1.0
+flow_neutral = 0.5
+flow_cold = 0.2
+growth_scale = 0.20                 # +20% growth scores 1.0, -20% scores 0
+margin_scale = 0.05
+roe_scale = 0.05
+
+[variants]
+standard_net_debt_ebitda_max = 4.0
+excluded_sics = ["6726"]            # BDCs and closed-end funds
+
+[variants.financials]
+sic_min = 6000                      # banks, card issuers, brokers, asset managers, insurers
+sic_max = 6411
+
+[variants.reit]
+sic = "6798"                        # without a property fact the REIT is a mortgage REIT: excluded
+net_debt_ebitda_max = 7.0
+
+[plans]
+entry_zone_atr = 0.5
+swing_stop_atr = 2.0
+position_stop_atr = 3.0
+swing_retrace = 0.5
+swing_time_stop = 20
+position_time_stop = 126
+
+[research]
+panel_start = "2009-01-01"          # five years of history before the first events
+start = "2014-01-01"
+oos_start = "2022-01-01"
+cooldown_days = 42
+horizons = [5, 21, 63, 126]
+go_horizon = 63
+purge_horizon = 126
+bootstrap_samples = 2000
+bootstrap_seed = 7
+min_events = 100
+min_win_rate = 0.55
+win_basis = "excess_spy"            # a win is a 63-day return above SPY's over the same days

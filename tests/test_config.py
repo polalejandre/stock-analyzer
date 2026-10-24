@@ -105,3 +105,33 @@ def test_wikipedia_contact_with_whitespace_is_rejected(tmp_path, contact):
     with pytest.raises(ConfigError, match="WIKIPEDIA_CONTACT"):
         load_settings(root=tmp_path,
                       environ={"SEC_USER_AGENT": "a a@test.invalid", "WIKIPEDIA_CONTACT": contact})
+
+
+def test_phase2_rules_load():
+    rules = load_rules(PROJECT_ROOT / "rules.toml")
+    assert rules.gates.guidance_tone_enabled is False
+    assert rules.gates.max_value_percentile == 30
+    assert rules.research.cooldown_days == 42
+    assert rules.research.horizons == (5, 21, 63, 126)
+    assert rules.research.win_basis == "excess_spy"
+    assert rules.variants.financials.sic_min == 6000
+    assert rules.variants.reit.net_debt_ebitda_max == 7.0
+    assert rules.variants.excluded_sics == ("6726",)
+    assert rules.score.tier_a == 75
+
+
+def test_unknown_rule_key_is_rejected(tmp_path):
+    text = (PROJECT_ROOT / "rules.toml").read_text().replace(
+        "cooldown_days = 42", "cooldown_days = 42\ncooldwn_days = 1")
+    path = tmp_path / "rules.toml"
+    path.write_text(text)
+    with pytest.raises(ValueError, match="research.*cooldwn_days"):
+        load_rules(path)
+
+
+def test_missing_rule_key_is_rejected(tmp_path):
+    text = (PROJECT_ROOT / "rules.toml").read_text().replace("cooldown_days = 42\n", "")
+    path = tmp_path / "rules.toml"
+    path.write_text(text)
+    with pytest.raises(ValueError, match="research.*cooldown_days"):
+        load_rules(path)
