@@ -9,7 +9,10 @@ stable margins and wiggle by about 1%. Each special stock exercises one gate:
 - EXP: the same drop, but earnings, revenue, cash flow and equity are 40% of the peers', so its
   ratios sit above the peer median (gate 1 fails).
 - SHK: a drop of about 19% that includes one -12% day (shock, gate 4 fails).
-- TRAP: the same drop as DIP, but revenue peaks at Q4 2013 and then falls 8% a quarter (gate 3).
+- TRAP: the same drop as DIP and cheap (30 shares), but revenue peaks at Q4 2013 and then falls
+  2% a quarter: gate 1 passes and the revenue rule (gate 3) is the only thing blocking it.
+- RR: dislocated (18% drop), cheap and healthy, but its daily range is +-5%, so the ATR stops
+  are so wide that neither plan reaches the minimum reward/risk (gate 5 fails).
 - OUT: dislocated like DIP and an index member, but no CIK or filings, so it is in
   `dislocated_all` and never in `rows` (a symbol outside every index has no panel column at all).
 
@@ -35,9 +38,11 @@ DATES = pd.bdate_range("2012-01-02", "2016-12-30")
 DROP_START = pd.Timestamp("2015-09-01")
 DROP_DAYS = 40
 FILING_LAG_DAYS = 40
-EXP, SHK, TRAP, OUT = "EXP", "SHK", "TRAP", "OUT"
-SPECIAL = [EXP, SHK, TRAP, OUT]
+EXP, SHK, TRAP, OUT, RR = "EXP", "SHK", "TRAP", "OUT", "RR"
+SPECIAL = [EXP, SHK, TRAP, OUT, RR]
 STOCKS = [DIP, *PEERS, *SPECIAL]
+SHARES = {TRAP: 30.0}             # TRAP is cheap: few shares, so its multiples stay low
+WIDE = {RR: 0.05}                 # high/low half-range: a big ATR makes both plans fail gate 5
 SCALE = {EXP: 0.4}                  # earnings, revenue, cash flow and equity relative to peers
 INSIDER_FILED = "2015-09-21"
 
@@ -56,6 +61,9 @@ def _closes(i: int, symbol: str) -> np.ndarray:
     if symbol == SHK:
         factor[k:k + 30] = np.linspace(1.0, 0.92, 30)
         factor[k + 30:] = 0.81                 # 0.92 -> 0.81: one -12% day
+    elif symbol == RR:
+        factor[k:k + DROP_DAYS] = np.linspace(1.0, 0.82, DROP_DAYS)
+        factor[k + DROP_DAYS:] = 0.82
     elif symbol in (DIP, EXP, TRAP, OUT):
         factor[k:k + DROP_DAYS] = np.linspace(1.0, 0.75, DROP_DAYS)
         factor[k + DROP_DAYS:] = 0.75
@@ -65,7 +73,8 @@ def _closes(i: int, symbol: str) -> np.ndarray:
 
 def _price_rows(symbol: str, closes: np.ndarray) -> list[tuple]:
     adj = closes * (0.85 + 0.00012 * np.arange(len(DATES)))   # dividends: adj_close != close
-    return [(symbol, d.date().isoformat(), c, c * 1.01, c * 0.99, c, a, 1_000_000.0, "fixture")
+    w = WIDE.get(symbol, 0.01)
+    return [(symbol, d.date().isoformat(), c, c * (1 + w), c * (1 - w), c, a, 1_000_000.0, "fixture")
             for d, c, a in zip(DATES, closes, adj, strict=True)]
 
 
@@ -77,7 +86,7 @@ def _fact_rows(cik: int, symbol: str) -> list[tuple]:
         start = (end - pd.offsets.QuarterEnd() + pd.Timedelta(days=1)).date().isoformat()
         filed = (end + pd.Timedelta(days=FILING_LAG_DAYS)).date().isoformat()
         e = end.date().isoformat()
-        rev = 1000 * scale * (1.02 ** k if symbol != TRAP or k <= 12 else 1.02 ** 12 * 0.92 ** (k - 12))
+        rev = 1000 * scale * (1.02 ** k if symbol != TRAP or k <= 12 else 1.02 ** 12 * 0.98 ** (k - 12))
         duration = {"revenue": ("us-gaap:Revenues", rev),
                     "operating_income": ("us-gaap:OperatingIncomeLoss", 0.20 * rev),
                     "net_income": ("us-gaap:NetIncomeLoss", 0.15 * rev),
@@ -88,7 +97,8 @@ def _fact_rows(cik: int, symbol: str) -> list[tuple]:
         instant = {"stockholders_equity": ("us-gaap:StockholdersEquity", 4000.0 * scale),
                    "cash": ("us-gaap:CashAndCashEquivalentsAtCarryingValue", 1000.0),
                    "long_term_debt": ("us-gaap:LongTermDebtNoncurrent", 1000.0),
-                   "shares_outstanding": ("dei:EntityCommonStockSharesOutstanding", 100.0)}
+                   "shares_outstanding": ("dei:EntityCommonStockSharesOutstanding",
+                                          SHARES.get(symbol, 100.0))}
         form = "10-K" if end.month == 12 else "10-Q"
         for concept, (tag, value) in duration.items():
             rows.append((cik, concept, tag, "USD", start, e, value, filed, form, f"{cik}-{e}", "companyfacts"))

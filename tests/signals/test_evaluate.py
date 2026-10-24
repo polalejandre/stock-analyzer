@@ -2,7 +2,17 @@ import pandas as pd
 import pytest
 
 from analyzer.signals.evaluate import evaluate, load_panels
-from tests.fixture_db import DIP, DROP_START, EXP, OUT, SHK, TRAP, build_fixture_db, fixture_rules
+from tests.fixture_db import (
+    DIP,
+    DROP_START,
+    EXP,
+    OUT,
+    RR,
+    SHK,
+    TRAP,
+    build_fixture_db,
+    fixture_rules,
+)
 
 RULES = fixture_rules()
 
@@ -40,6 +50,15 @@ def test_each_gate_blocks_its_stock(evaluation):
         assert len(mine) > 0, symbol
         assert not mine[gate].any(), (symbol, gate)
         assert not mine["setup"].any(), symbol
+
+
+def test_trap_fails_only_gate3_and_rr_only_gate5(evaluation):
+    rows = evaluation.rows
+    trap = rows[rows["symbol"] == TRAP]
+    assert trap["gate1"].all() and trap["gate4"].all() and not trap["gate3"].any()
+    rr = rows[rows["symbol"] == RR]
+    ok = rr[rr["gate1"] & rr["gate3"] & rr["gate4"] & ~rr["gate5"]]
+    assert len(ok) > 0 and not rr["setup"].any()
 
 
 def test_ineligible_dislocated_member_stays_out_of_rows(evaluation):
