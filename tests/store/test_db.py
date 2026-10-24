@@ -7,18 +7,18 @@ from analyzer.store.db import connect, get_state, migrate, set_state, upsert_row
 TABLES = {
     "companies", "tickers", "index_snapshots", "index_membership", "young_listings", "prices",
     "facts", "filings", "insider_transactions", "macro", "provider_status", "fetch_failures",
-    "sync_state", "splits",
+    "sync_state", "splits", "ticker_aliases", "member_fates",
 }
 
 
 def test_migrate_creates_tables_and_is_idempotent(tmp_path):
     conn = connect(tmp_path / "a.db")
-    assert migrate(conn) == 2
+    assert migrate(conn) == 3
     assert migrate(conn) == 0
     names = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     assert TABLES <= names
     assert conn.execute("SELECT version, name FROM schema_migrations").fetchall() == [
-        (1, "001_initial.sql"), (2, "002_splits.sql"),
+        (1, "001_initial.sql"), (2, "002_splits.sql"), (3, "003_identity.sql"),
     ]
 
 
@@ -29,7 +29,7 @@ def test_a_database_at_version_1_gets_the_splits_table(tmp_path):
     assert migrate(conn, files=_migration_files()[:1]) == 1
     conn.execute("INSERT INTO sync_state VALUES ('k', 'v')")
     conn.commit()
-    assert migrate(conn) == 1
+    assert migrate(conn) == 2
     assert get_state(conn, "k") == "v"
     conn.execute("INSERT INTO splits VALUES ('NVDA', '2024-06-10', 10.0)")
     with pytest.raises(sqlite3.IntegrityError):
@@ -75,3 +75,13 @@ def test_failed_migration_rolls_back(tmp_path):
     assert conn.execute("SELECT name FROM sqlite_master WHERE name='a'").fetchone() is None
     assert conn.execute("SELECT COUNT(*) FROM schema_migrations WHERE version=1").fetchone()[0] == 0
     assert conn.in_transaction is False
+
+
+def test_identity_migration_adds_tables(tmp_path):
+    from analyzer.store.db import connect, migrate
+    conn = connect(tmp_path / "a.db")
+    migrate(conn)
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(index_snapshots)")]
+    assert "cik" in cols
+    conn.execute("INSERT INTO ticker_aliases VALUES ('ANTM', 'ELV', 1156039, 'cik')")
+    conn.execute("INSERT INTO member_fates VALUES ('ATVI', 'acquired', 'Microsoft acquired')")

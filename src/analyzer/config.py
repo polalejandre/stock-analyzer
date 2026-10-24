@@ -6,7 +6,7 @@ import os
 import re
 import tomllib
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 
 from dotenv import dotenv_values
@@ -75,20 +75,175 @@ class UniverseRules:
 
 
 @dataclass(frozen=True)
+class FeatureRules:
+    high_window: int
+    shock_day_drop: float
+    correction_drawdown: float
+    year_days: int
+    percentile_window: int
+    percentile_min_obs: int
+    history_min_days: int
+    peer_min_size: int
+    ttm_max_age_days: int
+    shares_max_age_days: int
+    rsi_period: int
+    atr_period: int
+    ma_period: int
+    pivot_bars: int
+    weekly_pivot_bars: int
+    divergence_lookback: int
+    weekly_divergence_lookback: int
+    reclaim_bars: int
+    rs_short: int
+    rs_long: int
+    dv_short: int
+    dv_long: int
+    hot_rank: float
+    cold_rank: float
+    flow_min_industries: int
+    hot_dv_trend: float
+    accumulation_low: float
+    accumulation_high: float
+    insider_min_buyers: int
+    insider_exec_min_usd: float
+
+
+@dataclass(frozen=True)
+class GateRules:
+    max_value_percentile: float
+    min_cheaper_metrics: int
+    min_value_metrics: int
+    min_drawdown: float
+    min_gap_vs_etf: float
+    margin_drop: float
+    roe_drop: float
+    guidance_tone_enabled: bool
+    min_reward_risk: float
+
+
+@dataclass(frozen=True)
+class ScoreRules:
+    weight_value: float
+    weight_quality: float
+    weight_dislocation: float
+    weight_flow: float
+    weight_technical: float
+    insider_bonus: float
+    tier_a: float
+    tier_b: float
+    dislocation_correction_drift: float
+    dislocation_idiosyncratic_drift: float
+    flow_hot: float
+    flow_neutral: float
+    flow_cold: float
+    growth_scale: float
+    margin_scale: float
+    roe_scale: float
+
+
+@dataclass(frozen=True)
+class FinancialsRules:
+    sic_min: int
+    sic_max: int
+
+
+@dataclass(frozen=True)
+class ReitRules:
+    sic: str
+    net_debt_ebitda_max: float
+
+
+@dataclass(frozen=True)
+class VariantRules:
+    standard_net_debt_ebitda_max: float
+    excluded_sics: tuple[str, ...]
+    financials: FinancialsRules
+    reit: ReitRules
+
+
+@dataclass(frozen=True)
+class PlanRules:
+    entry_zone_atr: float
+    swing_stop_atr: float
+    position_stop_atr: float
+    swing_retrace: float
+    swing_time_stop: int
+    position_time_stop: int
+
+
+@dataclass(frozen=True)
+class ResearchRules:
+    panel_start: str
+    start: str
+    oos_start: str
+    cooldown_days: int
+    horizons: tuple[int, ...]
+    go_horizon: int
+    purge_horizon: int
+    bootstrap_samples: int
+    bootstrap_seed: int
+    min_events: int
+    min_win_rate: float
+    win_basis: str
+
+
+@dataclass(frozen=True)
+class RegimeRules:
+    loose_min: int
+    tight_max: int
+    min_known: int
+    median_window: int
+    change_window: int
+    yoy_window: int
+
+
+@dataclass(frozen=True)
 class Rules:
     version: str
     universe: UniverseRules
+    features: FeatureRules
+    gates: GateRules
+    score: ScoreRules
+    variants: VariantRules
+    plans: PlanRules
+    research: ResearchRules
+    regime: RegimeRules
+
+
+def _section(cls, table: dict, name: str, nested: dict | None = None):
+    """Build a rules dataclass from one TOML table. Unknown and missing keys are errors, so a
+    typo can never silently fall back to a default."""
+    nested = nested or {}
+    names = {f.name for f in fields(cls)}
+    plain = {k: v for k, v in table.items() if k not in nested}
+    unknown = sorted(set(plain) - names)
+    missing = sorted(names - set(plain) - set(nested))
+    if unknown or missing:
+        raise ValueError(f"rules.toml [{name}]: unknown keys {unknown}, missing keys {missing}")
+    values = {k: tuple(v) if isinstance(v, list) else v for k, v in plain.items()}
+    return cls(**values, **nested)
 
 
 def load_rules(path: Path = PROJECT_ROOT / "rules.toml") -> Rules:
-    data = tomllib.loads(path.read_text())
-    u = data["universe"]
+    return parse_rules(path.read_text())
+
+
+def parse_rules(text: str) -> Rules:
+    """Rules from the text of a rules.toml file."""
+    data = tomllib.loads(text)
+    v = data["variants"]
+    variants = _section(VariantRules, v, "variants", nested={
+        "financials": _section(FinancialsRules, v["financials"], "variants.financials"),
+        "reit": _section(ReitRules, v["reit"], "variants.reit"),
+    })
     return Rules(
         version=str(data["version"]),
-        universe=UniverseRules(
-            min_dollar_volume=float(u["min_dollar_volume"]),
-            dollar_volume_days=int(u["dollar_volume_days"]),
-            young_max_years=int(u["young_max_years"]),
-            young_min_market_cap=float(u["young_min_market_cap"]),
-        ),
+        universe=_section(UniverseRules, data["universe"], "universe"),
+        features=_section(FeatureRules, data["features"], "features"),
+        gates=_section(GateRules, data["gates"], "gates"),
+        score=_section(ScoreRules, data["score"], "score"),
+        variants=variants,
+        plans=_section(PlanRules, data["plans"], "plans"),
+        research=_section(ResearchRules, data["research"], "research"),
+        regime=_section(RegimeRules, data["regime"], "regime"),
     )

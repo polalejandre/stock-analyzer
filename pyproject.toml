@@ -28,8 +28,11 @@ packages = ["src/analyzer"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-markers = ["live: hits real external APIs (opt-in with: uv run pytest -m live)"]
-addopts = "-m 'not live'"
+markers = [
+    "live: hits real external APIs (opt-in with: uv run pytest -m live)",
+    "realdb: reads data/analyzer.db read-only, slow (opt-in with: uv run pytest -m realdb)",
+]
+addopts = "-m 'not live and not realdb'"
 
 [tool.ruff]
 line-length = 100

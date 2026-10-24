@@ -1,0 +1,8 @@
+# Renamed index members whose old ticker has no prices and no CIK in the Wikipedia snapshots
+# (every S&P 400 revision lacks the CIK column). One entry per rename:
+#
+# [[alias]]
+# ticker = "OLD"           # the ticker in the index snapshots
+# price_symbol = "NEW"     # the symbol its price history lives under today
+#
+# Add entries when the research coverage report lists a renamed company under "excluded".

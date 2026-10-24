@@ -175,18 +175,18 @@ def screen(ctx, monkeypatch):
 
 def test_step_universe_does_not_screen_young_listings(ctx, screen):
     for snapshot_date in ("2026-09-01", "2026-10-09"):
-        ctx.conn.execute("INSERT INTO index_snapshots VALUES ('sp500', ?, 1, 'AAPL', NULL, NULL, NULL, NULL)",
+        ctx.conn.execute("INSERT INTO index_snapshots VALUES ('sp500', ?, 1, 'AAPL', NULL, NULL, NULL, NULL, NULL)",
                          (snapshot_date,))
     result = step_universe(ctx)
     assert screen == ["refresh_tickers"]  # no screen here: index prices are not stored yet
-    assert result.attempted == 2 * len(INDEXES) + 1
+    assert result.attempted == 2 * len(INDEXES) + 1 + 1  # + aliases
     assert result.failed == []
-    assert result.detail == "tickers=7"
+    assert result.detail == "tickers=7 aliases=0 recycled=0 excluded=0"
     assert result.latest_data_date == date(2026, 10, 9)  # the newest snapshot actually stored
 
 
 def test_step_universe_freshness_is_the_stored_snapshot_not_today(ctx, screen):
-    ctx.conn.execute("INSERT INTO index_snapshots VALUES ('sp500', '2026-10-01', 1, 'AAPL', NULL, NULL, NULL, NULL)")
+    ctx.conn.execute("INSERT INTO index_snapshots VALUES ('sp500', '2026-10-01', 1, 'AAPL', NULL, NULL, NULL, NULL, NULL)")
     assert step_universe(ctx).latest_data_date == date(2026, 10, 1)
     ctx.conn.execute("DELETE FROM index_snapshots")
     assert step_universe(ctx).latest_data_date is None
@@ -206,9 +206,9 @@ def test_step_universe_one_failing_index_does_not_skip_the_other(ctx, screen, mo
     assert synced == list(INDEXES)
     assert result.failed == [(INDEXES[0], "RuntimeError: wikipedia 503"),
                              ("sp400 2026-09-01", "bad table")]
-    assert result.attempted == 1 + 3 + 1  # the failed index, the other index, the ticker map
+    assert result.attempted == 1 + 3 + 1 + 1  # failed index, other index, ticker map, aliases
     assert result.phase_failed and not result.healthy
-    assert result.detail == "tickers=7"  # the rest of the step still ran
+    assert result.detail == "tickers=7 aliases=0 recycled=0 excluded=0"  # the rest of the step still ran
 
 
 def test_young_screen_runs_after_prices_are_synced(ctx, screen):
@@ -866,6 +866,18 @@ def test_step_universe_lists_given_up_months_without_counting_them(ctx, screen, 
     monkeypatch.setattr(update, "sync_index_snapshots", lambda conn, wiki, name, today: SnapshotSync(
         attempted=1, skipped=[f"{name} 2013-04-01"] if name == "sp500" else []))
     result = step_universe(ctx)
-    assert result.attempted == len(INDEXES) + 1
+    assert result.attempted == len(INDEXES) + 1 + 1  # + aliases
     assert result.failed == [] and result.healthy
-    assert result.detail == "tickers=7 skipped_months=[sp500 2013-04-01]"
+    assert result.detail == "tickers=7 aliases=0 recycled=0 excluded=0 skipped_months=[sp500 2013-04-01]"
+
+
+def test_step_universe_alias_failure_is_recorded_but_keeps_other_results(ctx, screen, monkeypatch):
+    def boom(conn, wiki):
+        raise RuntimeError("alias boom")
+
+    monkeypatch.setattr(update, "sync_aliases", boom)
+    result = step_universe(ctx)
+    assert [name for name, _ in result.failed] == ["aliases"]
+    assert "alias boom" in result.failed[0][1]
+    assert result.detail.startswith("tickers=7")
+    assert result.attempted == 2 * len(INDEXES) + 1 + 1

@@ -65,6 +65,13 @@ CONCEPTS: tuple[Concept, ...] = (
     Concept("total_assets", "instant", "USD", _g("Assets")),
     Concept("shares_outstanding", "instant", "shares", _g(
         "dei:EntityCommonStockSharesOutstanding", "CommonStockSharesOutstanding")),
+    # Bank revenue = net interest income + noninterest income (addendum 3.3), used when a
+    # financial company reports no revenue tag.
+    Concept("net_interest_income", "duration", "USD", _g("InterestIncomeExpenseNet")),
+    Concept("noninterest_income", "duration", "USD", _g("NoninterestIncome")),
+    # An equity REIT owns property; a REIT without it is a mortgage REIT (addendum 5.3).
+    Concept("real_estate_property", "instant", "USD", _g(
+        "RealEstateInvestmentPropertyNet", "RealEstateInvestmentPropertyAtCost")),
 )
 
 CONCEPT_BY_NAME = {c.name: c for c in CONCEPTS}

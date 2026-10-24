@@ -31,6 +31,9 @@ def refresh_tickers(conn, ticker_map: pd.DataFrame, today: date) -> int:
     young = set(young_cik)
     sec = ticker_map.set_index("ticker")
     sic = dict(conn.execute("SELECT cik, sic FROM companies").fetchall())
+    snap_cik = dict(conn.execute(  # ordered by date, so dict() keeps each ticker's latest CIK
+        "SELECT ticker, cik FROM index_snapshots WHERE cik IS NOT NULL "
+        "ORDER BY snapshot_date").fetchall())
 
     rows = []
     for ticker in sorted(set(latest.index) | young):
@@ -39,6 +42,8 @@ def refresh_tickers(conn, ticker_map: pd.DataFrame, today: date) -> int:
         cik = _clean(sec.at[ticker, "cik"]) if in_sec else None
         if cik is None:
             cik = young_cik.get(ticker)
+        if cik is None:
+            cik = snap_cik.get(ticker)
         cik = int(cik) if cik is not None else None
         name = _clean(sec.at[ticker, "name"]) if in_sec else None
         exchange = _clean(sec.at[ticker, "exchange"]) if in_sec else None

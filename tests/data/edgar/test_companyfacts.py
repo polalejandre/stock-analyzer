@@ -349,10 +349,13 @@ def test_all_versions_drops_predecessor_periods_the_current_cik_reports(conn):
     old = {"cik": 34088, "facts": {"us-gaap": {"Revenues": usd(
         fact("2010-01-01", "2010-03-31", 500, "2010-05-01", "o1"),
         fact("2022-01-31", "2022-05-01", 7777, "2022-05-20", "o2"),
+        fact("2022-01-31", "2022-05-01", 8888, "2022-06-01", "o3"),   # after the current CIK's
     )}}}
     store_facts(conn, extract_facts(old, 34088))
     rev = load_concept(conn, 1045810, "revenue", merges={1045810: [34088]}, all_versions=True)
-    assert rev["value"].tolist() == [500, 1000, 1050]
+    # point in time: the predecessor's 7777 was known before the current CIK reported the period
+    # (2022-05-27), so it stays; its 8888, filed after that report, is dropped
+    assert rev["value"].tolist() == [500, 7777, 1000, 1050]
     early = load_concept(conn, 1045810, "revenue", as_of=date(2022, 5, 26),
                          merges={1045810: [34088]}, all_versions=True)
     assert early["value"].tolist() == [500, 7777]

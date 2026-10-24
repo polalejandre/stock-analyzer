@@ -56,14 +56,16 @@ def load_concept(
     df = df.sort_values(["period_start", "period_end", "foreign", "prio", "filed", "accession"],
                         ascending=[True, True, True, True, False, False])
     if all_versions:
-        # A predecessor's version is dropped only where the current CIK reported the period on
-        # time; a successor's late comparative must not hide the predecessor's first report.
-        on_time = (pd.to_datetime(df["filed"]) - pd.to_datetime(df["period_end"])).dt.days \
-            <= FIRST_REPORT_DAYS
-        df["own_on_time"] = (df["foreign"] == 0) & on_time
-        own = df.groupby(["period_start", "period_end"])["own_on_time"].transform("any")
-        df = df[(df["foreign"] == 0) | ~own].drop_duplicates(
-            ["period_start", "period_end", "accession"], keep="first")
+        # A predecessor's version is dropped only where the current CIK had already reported the
+        # period on time when it was filed: a successor's late comparative must not hide the
+        # predecessor's first report, and a successor's filing cannot reach back before its own
+        # date (point in time: the answer for a row never depends on later filings).
+        filed = pd.to_datetime(df["filed"])
+        on_time = (filed - pd.to_datetime(df["period_end"])).dt.days <= FIRST_REPORT_DAYS
+        own_first = filed.where((df["foreign"] == 0) & on_time)
+        own_first = own_first.groupby([df["period_start"], df["period_end"]]).transform("min")
+        hidden = (df["foreign"] == 1) & own_first.notna() & (own_first <= filed)
+        df = df[~hidden].drop_duplicates(["period_start", "period_end", "accession"], keep="first")
     else:
         df = df.drop_duplicates(["period_start", "period_end"], keep="first")
     df["period_start"] = pd.to_datetime(df["period_start"].mask(df["period_start"] == "")).astype(_DT)

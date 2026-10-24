@@ -24,6 +24,7 @@ from analyzer.data.http import FetchError
 from analyzer.data.price_sync import latest_market_date, sync_prices
 from analyzer.data.prices import NasdaqPrices, PriceProvider, YFinancePrices
 from analyzer.store.db import connect, get_state, migrate, set_state, upsert_rows
+from analyzer.universe.aliases import sync_aliases
 from analyzer.universe.industry import ALL_REFERENCE_ETFS
 from analyzer.universe.members import price_symbols
 from analyzer.universe.membership import INDEXES
@@ -93,6 +94,14 @@ def step_universe(ctx: UpdateContext) -> StepResult:
     ticker_map = load_ticker_map(ctx.clients.sec)
     res.attempted += 1
     res.detail = f"tickers={refresh_tickers(ctx.conn, ticker_map, ctx.today)}"
+    res.attempted += 1
+    try:
+        summary = sync_aliases(ctx.conn, ctx.clients.wiki)
+        res.detail += (f" aliases={summary.aliases} recycled={summary.recycled} "
+                       f"excluded={sum(summary.excluded.values())}")
+    except Exception as exc:  # identity is rebuilt next run; membership itself is fine
+        log.exception("alias sync failed")
+        res.failed.append(("aliases", _err(exc)))
     if skipped:  # historical months given up on after repeated failures; not counted as failed
         res.detail += f" skipped_months=[{', '.join(skipped)}]"
     latest = ctx.conn.execute("SELECT MAX(snapshot_date) FROM index_snapshots").fetchone()[0]
