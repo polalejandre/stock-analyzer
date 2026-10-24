@@ -5,7 +5,8 @@
 - Plan: `docs/plans/2026-10-24-phase-2-features-signals-research.md`; spec: the 2026-10-24 addendum.
 - Built: panels, features, signals, `analyzer research run`. Guidance tone, watchlist, shorts,
   young listings and positions are not built yet (addendum 2.2).
-- Rules version 2026.10.24-3. Controller rulings: see SDD ledger rulings R1-R32.
+- Rules version 2026.10.24-4 (was -3 for the first run; -4 adds `[regime] min_known`).
+  Controller rulings: see SDD ledger rulings R1-R38.
 - Data refresh (2026-10-24, DB backed up first to `data/analyzer.db.bak-pre-phase2`):
   universe `aliases=50 recycled=31 excluded=480`; edgar `reextracted=1799` (1/1780 failed; the
   EDGAR daily-index fetch got HTTP 403, so provider_status was not updated). Prices were not
@@ -18,6 +19,36 @@
   - In-sample tests: n PASS; median_xs_spy FAIL (setup median 63d excess vs SPY -1.15%);
     win_rate FAIL (48.2%); beats_dislocated FAIL (dislocated -0.10%); quintiles PASS.
     Verdict: FAIL (in-sample: tuning only).
+- Final-review fix wave (R33-R38, 2026-10-24): fundamentals are point-in-time on real data
+  (quarter candidates in filing order, first-filed YTD links, predecessor-CIK versions dropped
+  only once the current CIK reported); YoY features compare with year-ago fields, not a 252-day
+  shift; the reference ETF falls back per day (industry, sector, SPY) until it has a 63-day
+  return; the regime is classified from at least 5 of 6 known indicators, with stale values
+  unknown; `--rules` may not change `[research]`; OOS runs log a "started" row first; the flow
+  breakdown is named `flow` and a `ref_etf` breakdown is added; the revenue trap rule is known
+  when TTM growth >= 0.
+- Real-database truncation test (`uv run pytest -m realdb`, opt-in): 111 sampled symbols
+  (100 random plus 15 named, incl. HAIN, WDC, AVGO, some overlapping) plus every reference ETF, evaluated on data to
+  2021-12-31 and on data cut at 2016-08-15, 2018-06-29 and 2020-03-31. After the fix wave: 0
+  differing fundamental cells, rows, columns, eligible/trap/member cells, dislocated_all rows
+  and regime days at every cut (2:29). Before it, at the 2016 cut: 505 revenue_ttm and 567
+  `annual` cells differed, and 108 event rows had a different growth score.
+- In-sample run after the fix wave (2026-10-24, rules 2026.10.24-4): 9:44 wall clock, peak
+  memory 2,691,792 kB (about 2.6 GiB), report `data/research/20261024-140642-in_sample`.
+  - Groups: setup n=441, dislocated n=3865, dislocated_all n=4843 (first run: 436 / 3787 / 4726).
+  - Setup median 63d excess vs SPY -1.09% (was -1.15%), win rate 48.5% (was 48.2%); dislocated
+    median -0.03% (was -0.10%); dislocated_all -0.29% (was -0.32%).
+  - Verdict line, first run: `n PASS, median_xs_spy FAIL, win_rate FAIL, beats_dislocated FAIL,
+    quintiles PASS -> FAIL (in-sample: tuning only)`.
+  - Verdict line, now: `n PASS, median_xs_spy FAIL, win_rate FAIL, beats_dislocated FAIL,
+    quintiles PASS -> FAIL (in-sample: tuning only)` (unchanged).
+  - Notes: setup n counts in-sample events only (events from 2014-01-01 whose 126-day window ends
+    before 2022-01-01). Coverage starts in 2010: S&P 500 snapshots begin 2010-01 and S&P 400
+    membership in 2013, so 2009 has no members. Event days with a known regime: 100% in every
+    group (setup 154 loose, 287 neutral, no tight; the high-yield spread series starts 2023, so
+    the regime uses the other five indicators; 2009-2013 is mostly unknown because the reverse
+    repo series is sparse and the 3-year medians need history). Ticker-days on a fallback
+    reference ETF: 65,085 member days, 27,405 eligible days.
 - Next: the owner reviews the in-sample results, may tune thresholds on in-sample data only,
   then freezes `rules.toml` (commit) and runs `analyzer research run --period oos` once.
 
