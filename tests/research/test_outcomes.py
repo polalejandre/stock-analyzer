@@ -191,3 +191,14 @@ def test_plan_on_a_series_that_ends_is_delisted():
     o = c = np.array([10.0, 10, 11, np.nan, np.nan, np.nan])
     outcome, price, r, days = simulate_plan(o, c, np.zeros(6, bool), 0, _plan(), "swing", 20)
     assert (outcome, price, days) == ("delisted", 11.0, 2) and abs(r - 0.5) < 1e-12
+
+
+def test_xs_ref_uses_the_events_own_reference_etf():
+    idx = pd.bdate_range("2024-01-01", periods=6)
+    s = make_price_panels(pd.DataFrame({"A": [10.0, 11, 12, 13, 14, 15]}, index=idx))
+    e = make_price_panels(pd.DataFrame({"SPY": [100.0] * 6, "XLK": [100.0, 100, 110, 110, 110, 110],
+                                        "XLF": [100.0, 100, 100, 100, 100, 100]}, index=idx))
+    ev = pd.DataFrame({"symbol": ["A", "A"], "pos": [0, 0], "ref_etf": ["XLF", "XLK"]})
+    out = forward_returns(ev, s, e, {"A": "XLK"}, horizons=(2,), mae_horizon=2)
+    assert abs(out.loc[0, "xs_ref_2"] - (12 / 11 - 1)) < 1e-12           # XLF flat
+    assert abs(out.loc[1, "xs_ref_2"] - (12 / 11 - 1 - 0.1)) < 1e-12     # XLK +10%

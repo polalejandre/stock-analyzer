@@ -78,6 +78,7 @@ class Evaluation:
     skipped: dict[str, int]
     variants: pd.Series
     regime: pd.Series
+    ref_fallback: pd.DataFrame  # the day's reference ETF is a fallback (no window for the first)
 
 
 def _long(mask: pd.DataFrame) -> pd.DataFrame:
@@ -86,10 +87,23 @@ def _long(mask: pd.DataFrame) -> pd.DataFrame:
     return rows.sort_values(["date", "symbol"]).reset_index(drop=True)
 
 
+def reference_chains(entities: pd.DataFrame) -> dict[str, tuple[str, ...]]:
+    """Each symbol's reference ETFs in order of preference: industry ETF, sector ETF (SPY is
+    always last). The first with a 63-day return on a day is that day's reference (addendum 5.7)."""
+    return {s: tuple(e for e in (r["industry_etf"], r["sector_etf"]) if isinstance(e, str) and e)
+            for s, r in entities.iterrows()}
+
+
+def _ref_names(choice: pd.DataFrame, etfs: pd.Index, rows: pd.DataFrame) -> np.ndarray:
+    c = pick(choice, rows)
+    names = np.asarray(list(etfs) + [None], dtype=object)
+    return names[np.where(np.isnan(c) | (c < 0), len(etfs), np.nan_to_num(c)).astype(int)]
+
+
 def evaluate(p: Panels, rules: Rules) -> Evaluation:
     f, feat = p.fundamentals, rules.features
     variants = variant_series(p.entities, f, rules.variants)
-    ref_of = p.entities["ref_etf"].to_dict()
+    ref_of = reference_chains(p.entities)
     # peers: p.member, the whole liquid index universe, not just names that pass eligibility (R24)
     vf = value_features(p.stocks.close, f, p.member, p.entities, columns_for_metrics(variants), feat)
     qf = quality_features(f, vf.net_debt, feat, rules.score)
@@ -118,7 +132,7 @@ def evaluate(p: Panels, rules: Rules) -> Evaluation:
     rows["missing_rules"] = [",".join(r for r in TRAP_RULES if unknown[r][i]) for i in range(len(rows))]
     rows["variant"] = rows["symbol"].map(variants)
     rows["cik"] = rows["symbol"].map(p.entities["cik"])
-    rows["ref_etf"] = rows["symbol"].map(p.entities["ref_etf"])
+    rows["ref_etf"] = _ref_names(disl.ref_choice, p.etfs.adj_close.columns, rows)  # that day's
     rows["sector"] = rows["symbol"].map(p.entities["sector"])
     assert not rows["since_high"].isna().any(), "a dislocated row must have a 63-day high"
     start = (rows["pos"] - rows["since_high"]).astype(int)
@@ -136,6 +150,13 @@ def evaluate(p: Panels, rules: Rules) -> Evaluation:
     rows["setup"] = rows["gate1"] & rows["gate3"] & rows["gate4"] & rows["gate5"]
     rows = pd.concat([rows, score(rows, rules)], axis=1)
     rows["regime"] = reg.reindex(pd.DatetimeIndex(rows["date"])).to_numpy()
-    return Evaluation(rows=rows, dislocated_all=_long(p.member & disl.dislocated),
+    dislocated_all = _long(p.member & disl.dislocated)
+    dislocated_all["ref_etf"] = _ref_names(disl.ref_choice, p.etfs.adj_close.columns, dislocated_all)
+    first = pd.Series({s: (c[0] if c else "SPY") for s, c in ref_of.items()})
+    first_pos = p.etfs.adj_close.columns.get_indexer(first.reindex(disl.ref_choice.columns)
+                                                     .fillna("SPY"))
+    ref_fallback = (disl.ref_choice >= 0) & (disl.ref_choice.to_numpy() != first_pos[None, :])
+    return Evaluation(rows=rows, dislocated_all=dislocated_all,
                       member=p.member, eligible=elig.eligible, trap_fails=trap.fails,
-                      skipped=elig.skipped, variants=variants, regime=reg)
+                      skipped=elig.skipped, variants=variants, regime=reg,
+                      ref_fallback=ref_fallback)

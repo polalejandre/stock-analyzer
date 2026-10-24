@@ -35,4 +35,10 @@ def coverage(conn, panels, evaluation) -> dict:
         "diluted_share_days": int((evaluation.member & f["diluted_shares"]).to_numpy().sum()),
         "annual_ttm_days": int((eligible & f["annual"]).to_numpy().sum()),
         "fallback_days": int((eligible & f["fallback"]).to_numpy().sum()),
+        # ticker-days whose reference ETF that day was a fallback (the industry ETF, or the
+        # sector ETF, had no 63-day return yet or no prices): universe members and eligible rows
+        "ref_fallback_days": {
+            "member": int((evaluation.member & evaluation.ref_fallback).to_numpy().sum()),
+            "eligible": int((eligible & evaluation.ref_fallback).to_numpy().sum()),
+        },
     }

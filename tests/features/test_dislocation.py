@@ -1,8 +1,9 @@
 import numpy as np
 import pandas as pd
+import pytest
 
 from analyzer.config import load_rules
-from analyzer.features.dislocation import dislocation
+from analyzer.features.dislocation import dislocation, reference_choice, reference_returns
 from tests.panel_fixtures import assert_truncation_invariant, cut, make_price_panels, random_walk
 
 RULES = load_rules()
@@ -60,3 +61,28 @@ def test_dislocation_is_truncation_invariant():
         return dislocation(cut(make_price_panels(closes), end), cut(etf, end), cut(spy, end),
                            {"A": "XLK", "B": "XLK"}, F, G)
     assert_truncation_invariant(compute, [closes.index[90], closes.index[150]])
+
+
+def test_reference_falls_back_until_a_late_etf_has_its_window():
+    # XLRE starts trading on day 100: before its 63-day window the sector ETF (XLF) is the
+    # reference; a stock whose chain is empty uses SPY
+    idx = pd.bdate_range("2015-01-01", periods=250)
+    xlre = pd.Series(np.where(np.arange(250) >= 100, 100.0, np.nan), index=idx)
+    etf_adj = pd.DataFrame({"XLRE": xlre, "XLF": np.linspace(100, 120, 250),
+                            "SPY": np.linspace(100, 90, 250)}, index=idx)
+    refs = {"A": ("XLRE", "XLF"), "B": ()}
+    choice = reference_choice(etf_adj, refs, ["A", "B"], 63)
+    assert (choice["A"].iloc[63:163] == 1).all() and (choice["A"].iloc[163:] == 0).all()
+    assert (choice["A"].iloc[:63] == -1).all() and (choice["B"].iloc[63:] == 2).all()
+    ret = reference_returns(etf_adj, refs, ["A", "B"], 63)
+    assert abs(ret["A"].iloc[120] - (etf_adj["XLF"].iloc[120] / etf_adj["XLF"].iloc[57] - 1)) < 1e-12
+    assert ret["A"].iloc[200] == 0.0                      # flat XLRE once it has its window
+    closes = pd.DataFrame({"A": np.linspace(100, 50, 250), "B": np.linspace(100, 50, 250)}, index=idx)
+    d = dislocation(make_price_panels(closes), etf_adj, etf_adj["SPY"], refs, F, G)
+    assert d.gap["A"].iloc[120] == pytest.approx(
+        closes["A"].iloc[120] / closes["A"].iloc[57] - 1 - ret["A"].iloc[120])
+    assert d.ref_choice.equals(choice)
+
+    def compute(end):
+        return reference_choice(cut(etf_adj, end), refs, ["A", "B"], 63)
+    assert_truncation_invariant(compute, [idx[100], idx[163], idx[200]])

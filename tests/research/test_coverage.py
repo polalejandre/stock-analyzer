@@ -41,6 +41,9 @@ def test_coverage_on_the_fixture(tmp_path):
     assert c["diluted_share_days"] == 0
     assert c["annual_ttm_days"] == 0
     assert c["fallback_days"] == 0
+    ref_fb = ev.ref_fallback.to_numpy()
+    assert c["ref_fallback_days"] == {"member": int(np.sum(member & ref_fb)),
+                                      "eligible": int(np.sum(eligible & ref_fb))}
 
     assert c["aliases"] == {"manual": 1}
     # GONE ends 2014-01-01: a member in 2013 only (end date exclusive)

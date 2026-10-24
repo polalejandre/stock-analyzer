@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
 
 from analyzer.config import FeatureRules
+from analyzer.features.dislocation import RefOf, reference_choice, take
 from analyzer.features.technical import bullish_divergence, confirmed_lows, pivot_pairs
 from analyzer.features.windows import reduce_since
 from analyzer.panel.prices import PricePanels
@@ -16,13 +17,14 @@ from analyzer.panel.prices import PricePanels
 HOT, NEUTRAL, COLD = 1.0, 0.0, -1.0
 
 
-def active_etfs(eligible: pd.DataFrame, ref_of: Mapping[str, str], etfs: Sequence[str]) -> pd.DataFrame:
-    out = pd.DataFrame(False, index=eligible.index, columns=list(etfs))
-    for etf in etfs:
-        cols = [c for c in eligible.columns if ref_of.get(c) == etf]
-        if cols:
-            out[etf] = eligible[cols].any(axis=1)
-    return out
+def active_etfs(eligible: pd.DataFrame, choice: pd.DataFrame, etfs: Sequence[str]) -> pd.DataFrame:
+    """Per day, the ETFs that are the reference of at least one eligible stock that day
+    (`choice`: positions in `etfs`, from `reference_choice`)."""
+    e = eligible.reindex(index=choice.index, columns=choice.columns, fill_value=False)
+    e = e.to_numpy(dtype=bool)
+    c = choice.to_numpy()
+    out = {etf: (e & (c == j)).any(axis=1) for j, etf in enumerate(etfs)}
+    return pd.DataFrame(out, index=choice.index, columns=list(etfs))
 
 
 def etf_flow_codes(etf: PricePanels, spy_adj: pd.Series, active: pd.DataFrame,
@@ -50,10 +52,10 @@ def etf_flow_codes(etf: PricePanels, spy_adj: pd.Series, active: pd.DataFrame,
     return codes.where(ranked.notna() & enough)
 
 
-def stock_codes(codes: pd.DataFrame, ref_of: Mapping[str, str], columns: Sequence[str]) -> pd.DataFrame:
-    out = codes.reindex(columns=[ref_of.get(c, "SPY") for c in columns])
-    out.columns = list(columns)
-    return out
+def stock_codes(codes: pd.DataFrame, choice: pd.DataFrame) -> pd.DataFrame:
+    """Each stock's flow code: the code of its reference ETF that day (`choice`, positions in
+    `codes.columns`), with the same per-day fallback as the dislocation gap."""
+    return take(codes, choice)
 
 
 @dataclass(frozen=True)
@@ -65,10 +67,13 @@ class Flow:
 
 
 def flow(prices: PricePanels, etf: PricePanels, spy_adj: pd.Series, eligible: pd.DataFrame,
-         ref_of: Mapping[str, str], since_high: pd.DataFrame, rules: FeatureRules) -> Flow:
+         ref_of: RefOf, since_high: pd.DataFrame, rules: FeatureRules) -> Flow:
     close, volume = prices.close, prices.volume
-    active = active_etfs(eligible, ref_of, list(etf.close.columns))
-    industry = stock_codes(etf_flow_codes(etf, spy_adj, active, rules), ref_of, close.columns)
+    etf_adj = etf.adj_close.reindex(index=close.index)
+    choice = reference_choice(etf_adj, ref_of, close.columns, rules.high_window)
+    active = active_etfs(eligible, choice, list(etf.close.columns))
+    industry = stock_codes(etf_flow_codes(etf, spy_adj, active, rules).reindex(index=close.index),
+                           choice)
 
     change = prices.adj_close.diff()
     vol = volume.to_numpy(dtype="float64")

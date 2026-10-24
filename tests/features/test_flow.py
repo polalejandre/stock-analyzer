@@ -2,7 +2,15 @@ import numpy as np
 import pandas as pd
 
 from analyzer.config import load_rules
-from analyzer.features.flow import COLD, HOT, NEUTRAL, active_etfs, etf_flow_codes, flow
+from analyzer.features.flow import (
+    COLD,
+    HOT,
+    NEUTRAL,
+    active_etfs,
+    etf_flow_codes,
+    flow,
+    stock_codes,
+)
 from analyzer.panel.prices import PricePanels
 from tests.panel_fixtures import assert_truncation_invariant, cut, make_price_panels, random_walk
 
@@ -82,7 +90,8 @@ def test_inactive_etfs_are_not_ranked():
 def test_active_etfs():
     idx = pd.bdate_range("2024-01-01", periods=2)
     eligible = pd.DataFrame({"A": [True, False], "B": [False, False]}, index=idx)
-    a = active_etfs(eligible, {"A": "XLK", "B": "XLE"}, ["XLK", "XLE"])
+    choice = pd.DataFrame({"A": [0, 0], "B": [1, 1]}, index=idx)   # positions in the ETF list
+    a = active_etfs(eligible, choice, ["XLK", "XLE"])
     assert a["XLK"].tolist() == [True, False] and not a["XLE"].any()
 
 
@@ -138,3 +147,30 @@ def test_obv_divergence_detected():
     r = _window(close, vol)
     assert r.obv_divergence["A"].iloc[-1]
     assert r.accumulation["A"].iloc[-1] >= 0.5
+
+
+def test_stock_codes_follow_the_days_reference_etf():
+    idx = pd.bdate_range("2024-01-01", periods=3)
+    codes = pd.DataFrame({"XLRE": [np.nan, np.nan, HOT], "XLF": [COLD, COLD, COLD]}, index=idx)
+    choice = pd.DataFrame({"A": [-1, 1, 0]}, index=idx)          # none, then XLF, then XLRE
+    out = stock_codes(codes, choice)["A"]
+    assert np.isnan(out.iloc[0]) and out.iloc[1] == COLD and out.iloc[2] == HOT
+
+
+def test_flow_tag_falls_back_with_the_reference_etf():
+    names = ["A", "B", "C", "D", "E"]
+    stocks = make_price_panels(random_walk(names, n=300, seed=31))
+    etf = random_walk(["XLRE", "XLF", "XLK", "XLE", "XLV", "XLI"], n=300, seed=32)
+    etf.iloc[:200, 0] = np.nan                                   # XLRE lists on day 200
+    etf = make_price_panels(etf)
+    spy = random_walk(["SPY"], n=300, seed=33)["SPY"]
+    eligible = pd.DataFrame(True, index=stocks.dates, columns=names)
+    since = pd.DataFrame(10.0, index=stocks.dates, columns=names)
+    others = {"B": "XLK", "C": "XLE", "D": "XLV", "E": "XLI"}
+    r = flow(stocks, etf, spy, eligible, {"A": ("XLRE", "XLF"), **others}, since, F)
+    ref = flow(stocks, etf, spy, eligible, {"A": "XLF", **others}, since, F)
+    # until XLRE has a 63-day window, A's tag is XLF's, ranked among the five ETFs in use
+    before = r.industry["A"].iloc[:263]
+    assert before.notna().sum() > 50
+    pd.testing.assert_series_equal(before, ref.industry["A"].iloc[:263])
+    assert r.industry["A"].iloc[263:].isna().all()               # XLRE: no 126-day RS yet

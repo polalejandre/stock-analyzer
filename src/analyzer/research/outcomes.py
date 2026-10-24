@@ -30,7 +30,8 @@ def forward_returns(events: pd.DataFrame, stocks: PricePanels, etfs: PricePanels
                     ref_of: Mapping[str, str], horizons: Sequence[int], mae_horizon: int) -> pd.DataFrame:
     """Forward returns from the next open. A stock that stops trading mid-window exits at its last
     valid close and then holds cash (so delistings stay in the statistics); `delisted_h` marks a
-    stock that is gone for good, as opposed to a gap. The benchmarks always run to `pos + h`."""
+    stock that is gone for good, as opposed to a gap. The benchmarks always run to `pos + h`.
+    The reference ETF is the event's `ref_etf` column when present (that day's reference)."""
     assert stocks.dates.equals(etfs.dates), "stock and ETF panels must share one calendar"
     n = len(stocks.dates)
     pos = events["pos"].to_numpy(dtype=int)
@@ -38,7 +39,11 @@ def forward_returns(events: pd.DataFrame, stocks: PricePanels, etfs: PricePanels
     ci = stocks.close.columns.get_indexer(events["symbol"])
     ci_ok = np.maximum(ci, 0)
     spy_ci = np.full(len(events), etfs.close.columns.get_loc("SPY"))
-    ref_ci = etfs.close.columns.get_indexer([ref_of.get(s, "SPY") for s in events["symbol"]])
+    # the event day's reference ETF (with the per-day fallback, from evaluate) when the events
+    # carry it; otherwise the static mapping
+    refs = (events["ref_etf"].where(events["ref_etf"].notna(), None).tolist()
+            if "ref_etf" in events else [ref_of.get(s, "SPY") for s in events["symbol"]])
+    ref_ci = etfs.close.columns.get_indexer(refs)
     s_open, s_close = stocks.adj_open.to_numpy(), stocks.adj_close.to_numpy()
     e_open, e_close = etfs.adj_open.to_numpy(), etfs.adj_close.to_numpy()
     last_valid = _last_valid(s_close)
