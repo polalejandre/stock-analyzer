@@ -90,12 +90,14 @@ def evaluate(p: Panels, rules: Rules) -> Evaluation:
     f, feat = p.fundamentals, rules.features
     variants = variant_series(p.entities, f, rules.variants)
     ref_of = p.entities["ref_etf"].to_dict()
+    # peers: p.member, the whole liquid index universe, not just names that pass eligibility (R24)
     vf = value_features(p.stocks.close, f, p.member, p.entities, columns_for_metrics(variants), feat)
     qf = quality_features(f, vf.net_debt, feat, rules.score)
     elig = eligibility(p.member, variants, f, vf.market_cap, rules)
     disl = dislocation(p.stocks, p.etfs.adj_close, p.etfs.close["SPY"], ref_of, feat, rules.gates)
     tech = technical(p.stocks, feat)
-    fl = flow(p.stocks, p.etfs, p.etfs.adj_close["SPY"], elig.eligible, ref_of, disl.since_high, feat)
+    # flow ranks industries over p.member: reference ETFs used by the universe (spec 5.7, R24)
+    fl = flow(p.stocks, p.etfs, p.etfs.adj_close["SPY"], p.member, ref_of, disl.since_high, feat)
     trap = value_trap(qf, variants, rules)
     reg = regime(p.macro, rules.regime)
 
@@ -118,7 +120,8 @@ def evaluate(p: Panels, rules: Rules) -> Evaluation:
     rows["cik"] = rows["symbol"].map(p.entities["cik"])
     rows["ref_etf"] = rows["symbol"].map(p.entities["ref_etf"])
     rows["sector"] = rows["symbol"].map(p.entities["sector"])
-    start = (rows["pos"] - rows["since_high"].fillna(0)).astype(int)
+    assert not rows["since_high"].isna().any(), "a dislocated row must have a 63-day high"
+    start = (rows["pos"] - rows["since_high"]).astype(int)
     rows["window_start"] = p.dates[start.to_numpy()] if len(rows) else pd.Series(dtype="datetime64[ns]")
 
     rows = pd.concat([rows, undervalued(rows, vf, rules)], axis=1)

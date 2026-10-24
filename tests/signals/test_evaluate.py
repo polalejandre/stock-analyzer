@@ -2,7 +2,7 @@ import pandas as pd
 import pytest
 
 from analyzer.signals.evaluate import evaluate, load_panels
-from tests.fixture_db import DIP, DROP_START, build_fixture_db, fixture_rules
+from tests.fixture_db import DIP, DROP_START, EXP, OUT, SHK, TRAP, build_fixture_db, fixture_rules
 
 RULES = fixture_rules()
 
@@ -33,14 +33,40 @@ def test_setup_rows_carry_reasons_inputs(evaluation):
     assert row["missing_rules"] == ""
 
 
+def test_each_gate_blocks_its_stock(evaluation):
+    rows = evaluation.rows
+    for symbol, gate in ((EXP, "gate1"), (SHK, "gate4"), (TRAP, "gate3")):
+        mine = rows[rows["symbol"] == symbol]
+        assert len(mine) > 0, symbol
+        assert not mine[gate].any(), (symbol, gate)
+        assert not mine["setup"].any(), symbol
+
+
+def test_ineligible_dislocated_member_stays_out_of_rows(evaluation):
+    assert OUT in set(evaluation.dislocated_all["symbol"])
+    assert OUT not in set(evaluation.rows["symbol"])
+
+
+def test_dip_rows_use_all_four_metrics(evaluation):
+    assert (evaluation.rows.query("symbol == @DIP")["n_metrics"] == 4).all()
+
+
+def test_first_setup_row_window_and_insider(panels, evaluation):
+    row = evaluation.rows[evaluation.rows["setup"]].iloc[0]
+    close = panels.stocks.close
+    assert close.at[row["window_start"], row["symbol"]] == pytest.approx(row["high"], rel=1e-6)
+    assert row["insider_cluster"] and row["buyers"] == 1 and row["executive_buy"]
+
+
 def test_evaluate_is_truncation_invariant(panels, evaluation):
     first = evaluation.rows.loc[evaluation.rows["setup"], "date"].min()
     for d in (first, first + pd.Timedelta(days=14)):
         d = panels.dates[panels.dates.searchsorted(d)]
+        assert evaluation.rows.loc[evaluation.rows["date"] == d, "symbol"].nunique() >= 2
         part = evaluate(panels.upto(d), RULES).rows
         a = evaluation.rows[evaluation.rows["date"] == d].reset_index(drop=True)
         b = part[part["date"] == d].reset_index(drop=True)
-        pd.testing.assert_frame_equal(a, b, check_dtype=False)
+        pd.testing.assert_frame_equal(a, b)
 
 
 def test_skipped_counts_are_reported(evaluation):
