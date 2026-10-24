@@ -78,6 +78,7 @@ def parse_constituents(html: str) -> pd.DataFrame:
         sector = _find(cols, "gics sector")
         sub = _find(cols, "gics sub")
         added = _find(cols, "date added", "date first added")
+        cik_col = _find(cols, "cik")
         out = pd.DataFrame(
             {
                 "ticker": t[sym].map(normalize_ticker),
@@ -88,11 +89,40 @@ def parse_constituents(html: str) -> pd.DataFrame:
                     pd.to_datetime(t[added], errors="coerce").dt.strftime("%Y-%m-%d")
                     if added is not None else None
                 ),
+                "cik": (
+                    pd.to_numeric(t[cik_col], errors="coerce") if cik_col is not None else None
+                ),
             }
         )
         out["date_added"] = out["date_added"].where(out["date_added"].notna(), None)
+        out["cik"] = pd.Series([int(v) if pd.notna(v) else None for v in out["cik"]],
+                               index=out.index, dtype=object)
         return out.dropna(subset=["ticker"]).drop_duplicates("ticker").reset_index(drop=True)
     raise ValueError("no constituents table found")
+
+
+def parse_changes(html: str) -> pd.DataFrame:
+    """Removed tickers and the stated reason, from the "changes" table (two header rows: Date,
+    Added/Ticker, Added/Security, Removed/Ticker, Removed/Security, Reason). The table lists the
+    newest change first, so the first row of a ticker is its latest removal."""
+    try:
+        tables = pd.read_html(io.StringIO(html), flavor="lxml")
+    except ValueError:  # no tables at all
+        tables = []
+    for t in tables:
+        if not isinstance(t.columns, pd.MultiIndex):
+            continue
+        cols = {" ".join(str(p) for p in c).lower(): c for c in t.columns}
+        removed = _find(cols, "removed ticker")
+        reason = _find(cols, "reason")
+        if removed is None or reason is None:
+            continue
+        out = pd.DataFrame({"removed_ticker": t[removed].map(normalize_ticker),
+                            "reason": _text_column(t, reason)})
+        return out.dropna(subset=["removed_ticker"]).drop_duplicates(
+            "removed_ticker", keep="first").reset_index(drop=True)
+    return pd.DataFrame({"removed_ticker": pd.Series(dtype="str"),
+                         "reason": pd.Series(dtype="str")})
 
 
 def revisions_before(
@@ -192,13 +222,16 @@ def sync_index_snapshots(
             continue
         failures.pop(item, None)
         rows = [(index_name, d.isoformat(), rev.revid, r.ticker, r.security, r.gics_sector,
-                 r.gics_sub_industry, r.date_added) for r in df.itertuples()]
+                 r.gics_sub_industry, r.date_added, r.cik) for r in df.itertuples()]
         with conn:
             conn.execute(
                 "DELETE FROM index_snapshots WHERE index_name = ? AND snapshot_date = ?",
                 (index_name, d.isoformat()),
             )
-            conn.executemany("INSERT INTO index_snapshots VALUES (?,?,?,?,?,?,?,?)", rows)
+            conn.executemany(
+                "INSERT INTO index_snapshots (index_name, snapshot_date, revision_id, ticker, "
+                "security, gics_sector, gics_sub_industry, date_added, cik) "
+                "VALUES (?,?,?,?,?,?,?,?,?)", rows)
         if d == today:
             today_ok = today_fetched = True
     day_key = MONTH_FAILURES_DAY_KEY.format(index_name)

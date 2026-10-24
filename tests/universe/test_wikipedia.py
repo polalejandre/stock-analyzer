@@ -343,3 +343,42 @@ def test_unreadable_failure_state_only_costs_retries(tmp_path):
         client, session = _broken_month_client(tmp_path / str(len(bad)), "2026-09-01")
         sync_index_snapshots(conn, client, "sp500", date(2026, 10, 10), start=date(2026, 8, 1))
         assert _asked(session, "2026-09-01") == 1
+
+
+from analyzer.universe.wikipedia import parse_changes  # noqa: E402
+
+CIK_TABLE = "<table><tr><th>Symbol</th><th>Security</th><th>GICS Sector</th><th>CIK</th></tr>" + "".join(
+    f"<tr><td>T{i}</td><td>Co {i}</td><td>Energy</td><td>{1000 + i:010d}</td></tr>" for i in range(60)
+) + "</table>"
+
+CHANGES = """
+<table>
+<tr><th rowspan="2">Date</th><th colspan="2">Added</th><th colspan="2">Removed</th><th rowspan="2">Reason</th></tr>
+<tr><th>Ticker</th><th>Security</th><th>Ticker</th><th>Security</th></tr>
+<tr><td>October 13, 2023</td><td>BX</td><td>Blackstone</td><td>ATVI</td><td>Activision</td><td>Microsoft acquired Activision Blizzard.</td></tr>
+<tr><td>June 1, 2020</td><td>X</td><td>Xco</td><td>OLD</td><td>Old Co</td><td>Market capitalization change.</td></tr>
+<tr><td>May 1, 2019</td><td>Y</td><td>Yco</td><td>OLD</td><td>Old Co</td><td>Earlier removal.</td></tr>
+</table>
+"""
+
+
+def test_parse_constituents_reads_cik_column():
+    df = parse_constituents(CIK_TABLE)
+    assert df.loc[df.ticker == "T5", "cik"].item() == 1005
+
+
+def test_parse_constituents_without_cik_column_gives_none():
+    html = CIK_TABLE.replace("<th>CIK</th>", "<th>Other</th>")
+    df = parse_constituents(html)
+    assert df["cik"].isna().all()
+
+
+def test_parse_changes_keeps_latest_reason_per_removed_ticker():
+    df = parse_changes(CHANGES)
+    reasons = dict(zip(df.removed_ticker, df.reason, strict=True))
+    assert reasons["ATVI"] == "Microsoft acquired Activision Blizzard."
+    assert reasons["OLD"] == "Market capitalization change."
+
+
+def test_parse_changes_without_table_is_empty():
+    assert parse_changes(CIK_TABLE).empty

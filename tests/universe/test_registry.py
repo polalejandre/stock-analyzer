@@ -10,11 +10,11 @@ def test_refresh_tickers_combines_wikipedia_sec_and_sic(tmp_path):
     conn = connect(tmp_path / "t.db")
     migrate(conn)
     conn.executemany(
-        "INSERT INTO index_snapshots VALUES (?,?,?,?,?,?,?,?)",
-        [("sp500", "2026-09-01", 1, "NVDA", "Nvidia", "Information Technology", "Old Sub", None),
-         ("sp500", "2026-10-01", 2, "NVDA", "Nvidia", "Information Technology", "Semiconductors", None)],
+        "INSERT INTO index_snapshots VALUES (?,?,?,?,?,?,?,?,?)",
+        [("sp500", "2026-09-01", 1, "NVDA", "Nvidia", "Information Technology", "Old Sub", None, None),
+         ("sp500", "2026-10-01", 2, "NVDA", "Nvidia", "Information Technology", "Semiconductors", None, None)],
     )
-    conn.execute("INSERT INTO index_snapshots VALUES ('sp400','2026-10-01',3,'NOGX','NoGics',NULL,NULL,NULL)")
+    conn.execute("INSERT INTO index_snapshots VALUES ('sp400','2026-10-01',3,'NOGX','NoGics',NULL,NULL,NULL,NULL)")
     conn.execute("INSERT INTO companies VALUES (555, 'NoGics Inc', '3674', 'Semis', 'x')")
     conn.execute("INSERT INTO young_listings VALUES ('SNDK', 2023207, '2025-02-24', '2026-10-10')")
     conn.execute("INSERT INTO companies VALUES (2023207, 'Sandisk Corp', '3572', 'Computer Storage', 'x')")

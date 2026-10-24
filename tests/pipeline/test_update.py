@@ -175,7 +175,7 @@ def screen(ctx, monkeypatch):
 
 def test_step_universe_does_not_screen_young_listings(ctx, screen):
     for snapshot_date in ("2026-09-01", "2026-10-09"):
-        ctx.conn.execute("INSERT INTO index_snapshots VALUES ('sp500', ?, 1, 'AAPL', NULL, NULL, NULL, NULL)",
+        ctx.conn.execute("INSERT INTO index_snapshots VALUES ('sp500', ?, 1, 'AAPL', NULL, NULL, NULL, NULL, NULL)",
                          (snapshot_date,))
     result = step_universe(ctx)
     assert screen == ["refresh_tickers"]  # no screen here: index prices are not stored yet
@@ -186,7 +186,7 @@ def test_step_universe_does_not_screen_young_listings(ctx, screen):
 
 
 def test_step_universe_freshness_is_the_stored_snapshot_not_today(ctx, screen):
-    ctx.conn.execute("INSERT INTO index_snapshots VALUES ('sp500', '2026-10-01', 1, 'AAPL', NULL, NULL, NULL, NULL)")
+    ctx.conn.execute("INSERT INTO index_snapshots VALUES ('sp500', '2026-10-01', 1, 'AAPL', NULL, NULL, NULL, NULL, NULL)")
     assert step_universe(ctx).latest_data_date == date(2026, 10, 1)
     ctx.conn.execute("DELETE FROM index_snapshots")
     assert step_universe(ctx).latest_data_date is None
