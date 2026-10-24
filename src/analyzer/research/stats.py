@@ -59,12 +59,18 @@ def summarize(events: pd.DataFrame, rules: Rules) -> dict:
 
 def quintiles(setups: pd.DataFrame, rules: Rules) -> pd.DataFrame:
     h = rules.research.go_horizon
-    e = setups[setups[f"xs_spy_{h}"].notna()]
+    e = setups[setups[f"xs_spy_{h}"].notna() & setups["score"].notna()]
     if len(e) < 5:
         return pd.DataFrame(columns=["quintile", "n", "median_xs_spy"])
-    q = pd.qcut(e["score"].rank(method="first"), 5, labels=[1, 2, 3, 4, 5])
+    # Tied scores are ordered by a stable hash of (symbol, date): independent of row order and outcomes.
+    keys = [c for c in ("symbol", "date") if c in e] or ["date"]
+    tie = pd.util.hash_pandas_object(e[keys], index=False).to_numpy()
+    order = np.lexsort((tie, e["score"].to_numpy(dtype=float)))
+    pos = np.empty(len(e), dtype=int)
+    pos[order] = np.arange(len(e))
+    q = pd.qcut(pd.Series(pos, index=e.index), 5, labels=[1, 2, 3, 4, 5])
     g = e.groupby(q, observed=True)[f"xs_spy_{h}"]
-    return pd.DataFrame({"quintile": [int(k) for k in g.groups], "n": g.size().to_numpy(),
+    return pd.DataFrame({"quintile": [int(k) for k in g.size().index], "n": g.size().to_numpy(),
                          "median_xs_spy": g.median().to_numpy()})
 
 
@@ -76,7 +82,7 @@ def breakdowns(events: pd.DataFrame, columns: Sequence[str], rules: Rules) -> pd
         if col not in e:
             continue
         g = e.groupby(e[col].astype(str))
-        parts.append(pd.DataFrame({"column": col, "value": list(g.groups),
+        parts.append(pd.DataFrame({"column": col, "value": g.size().index.to_numpy(),
                                    "n": g.size().to_numpy(),
                                    "median_xs_spy": g[f"xs_spy_{h}"].median().to_numpy(),
                                    "win_rate": g["_win"].mean().to_numpy()}))

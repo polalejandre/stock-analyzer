@@ -89,3 +89,45 @@ def test_verdict_fails_when_top_quintile_not_above_bottom():
     v = verdict(good, {"median_xs_spy": 0.01}, q, R)
     assert not v["passed"] and v["tests"]["quintiles"] is False
     assert all(val for k, val in v["tests"].items() if k != "quintiles")
+
+
+def test_quintiles_with_tied_scores_ignore_row_order():
+    rng = np.random.default_rng(3)
+    n = 60
+    ev = _events(list(rng.normal(0, 0.05, n)))
+    ev["score"] = rng.integers(0, 3, n).astype(float)  # heavy ties
+    ev["symbol"] = [f"S{i}" for i in range(n)]
+    shuffled = ev.sample(frac=1, random_state=11)
+    a, b = quintiles(ev, R), quintiles(shuffled, R)
+    pd.testing.assert_frame_equal(a, b)
+    assert a["n"].sum() == n
+
+
+def test_quintiles_exclude_nan_scores():
+    ev = _events(list(np.linspace(-0.1, 0.1, 50)))
+    ev.loc[:9, "score"] = np.nan
+    q = quintiles(ev, R)
+    assert q["n"].sum() == 40
+
+
+def test_verdict_nan_and_empty_inputs_fail():
+    nan = float("nan")
+    ok_q = pd.DataFrame({"quintile": [1, 5], "n": [30, 30], "median_xs_spy": [0.0, 0.05]})
+    v = verdict({"n": 150, "median_xs_spy": nan, "win_rate": 0.6}, {"median_xs_spy": 0.01}, ok_q, R)
+    assert not v["passed"]
+    assert v["tests"]["median_xs_spy"] is False and v["tests"]["beats_dislocated"] is False
+    v = verdict({"n": 150, "median_xs_spy": 0.03, "win_rate": nan}, {"median_xs_spy": 0.01}, ok_q, R)
+    assert not v["passed"] and v["tests"]["win_rate"] is False
+    empty = pd.DataFrame(columns=["quintile", "n", "median_xs_spy"])
+    v = verdict({"n": 150, "median_xs_spy": 0.03, "win_rate": 0.6}, {"median_xs_spy": 0.01}, empty, R)
+    assert not v["passed"] and v["tests"]["quintiles"] is False
+
+
+def test_bootstrap_resamples_whole_months():
+    months = np.repeat(np.arange(12), 10)
+    values = months.astype(float)  # every month holds one distinct value
+
+    def intact(v):  # 1 only if every month value appears in whole blocks of 10
+        return float(all(c % 10 == 0 for c in np.unique(v, return_counts=True)[1]))
+
+    assert bootstrap_ci(values, months, intact, 200, seed=1) == (1.0, 1.0)
