@@ -103,7 +103,7 @@ Phase 2 needs these changes to the phase-1 data layer. Each one has a test.
   Q3 2015 case).
 - **Stale share counts:** a cover-page share count filed more than 15 months before `as_of` is
   not used; diluted weighted-average shares are used instead (spec 3.3 already names that
-  fallback). The audit reports how often this happens.
+  fallback). The research coverage report counts how often this happens (`diluted_share_days`).
 
 ### 3.4 Deferred data items
 

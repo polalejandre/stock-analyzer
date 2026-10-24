@@ -1,5 +1,26 @@
 # Phase 1 status and resume notes (2026-10-10)
 
+## Phase 2 status (features, signals, research harness)
+
+- Plan: `docs/plans/2026-10-24-phase-2-features-signals-research.md`; spec: the 2026-10-24 addendum.
+- Built: panels, features, signals, `analyzer research run`. Guidance tone, watchlist, shorts,
+  young listings and positions are not built yet (addendum 2.2).
+- Rules version 2026.10.24-3. Controller rulings: see SDD ledger rulings R1-R32.
+- Data refresh (2026-10-24, DB backed up first to `data/analyzer.db.bak-pre-phase2`):
+  universe `aliases=50 recycled=31 excluded=480`; edgar `reextracted=1799` (1/1780 failed; the
+  EDGAR daily-index fetch got HTTP 403, so provider_status was not updated). Prices were not
+  refreshed (latest 2026-10-09).
+- First in-sample run (2026-10-24, rules 2026.10.24-3): 8:16 wall clock, peak memory 2,339,192 kB (about 2.2 GiB).
+  - Coverage (members with prices): 2010 69%, 2011 71%, 2012 74%, 2013 66%, 2014 69%, 2015 68%,
+    2016 73%, 2017 75%, 2018 78%, 2019 81%, 2020 84%, 2021 85% (2009 has no members); aliases 50 (cik);
+    excluded acquired 145, other 108, recycled 31, unknown 227.
+  - Groups: setup n=436, dislocated n=3787, dislocated_all n=4726.
+  - In-sample tests: n PASS; median_xs_spy FAIL (setup median 63d excess vs SPY -1.15%);
+    win_rate FAIL (48.2%); beats_dislocated FAIL (dislocated -0.10%); quintiles PASS.
+    Verdict: FAIL (in-sample: tuning only).
+- Next: the owner reviews the in-sample results, may tune thresholds on in-sample data only,
+  then freezes `rules.toml` (commit) and runs `analyzer research run --period oos` once.
+
 Branch `phase-1-data-layer`. Nothing is pushed or merged into `main` yet.
 Plan: `docs/plans/2026-10-10-phase-1-data-layer.md`. Spec: `docs/specs/2026-10-10-stock-analyzer-design.md`.
 The detailed ledger (every ruling, review and deferred item) is in
