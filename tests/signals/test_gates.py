@@ -122,3 +122,16 @@ def test_eligibility_counts_each_skip_reason_once_in_order():
     none = eligibility(member & False, variants, f, panel(CAP=np.nan), RULES)
     assert none.skipped == dict.fromkeys(("variant", "history", "required", "market_cap"), 0)
     assert not none.eligible.any().any()
+
+
+def test_revenue_rule_is_known_not_fired_when_growth_is_not_negative():
+    # quarters unknown everywhere: growth >= 0 settles the rule (it cannot fire); growth < 0 or
+    # unknown growth leaves it missing
+    q = _quality(revenue_growth=_frame(A=0.0, B=0.03, C=-0.02),
+                 revenue_decline_known=pd.DataFrame([[False, False, False]], index=IDX,
+                                                    columns=list("ABC")))
+    t = value_trap(q, VARIANTS, RULES)
+    assert not t.fails.any().any()
+    assert t.unknown["revenue"].iloc[0].tolist() == [False, False, True]
+    q = _quality(revenue_decline_known=pd.DataFrame(True, index=IDX, columns=list("ABC")))
+    assert value_trap(q, VARIANTS, RULES).unknown["revenue"].iloc[0].tolist() == [True] * 3

@@ -98,7 +98,10 @@ def value_trap(q: QualityFeatures, variants: pd.Series, rules: Rules) -> TrapRes
         "leverage": (q.nd_ebitda.to_numpy() > caps[None, :]),
     }
     known = {
-        "revenue": (q.revenue_growth.notna() & q.revenue_decline_known.astype(bool)).to_numpy(),
+        # growth >= 0 settles the rule (it cannot fire) whatever the quarters; growth < 0 needs
+        # both quarter comparisons
+        "revenue": (q.revenue_growth.notna() & (q.revenue_decline_known.astype(bool)
+                                                | (q.revenue_growth >= 0))).to_numpy(),
         "margin": q.margin_change.notna().to_numpy(),
         "roe": q.roe_change.notna().to_numpy(),
         "fcf": (q.fcf.notna() & q.fcf_prev.notna()).to_numpy(),
