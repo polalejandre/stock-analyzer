@@ -59,3 +59,45 @@ def test_valuation_target_per_metric_and_median():
     assert abs(out[0] - 50 * 15 / 20) < 1e-9               # 37.5
     assert abs(out[1] - (8 * 200 - 300) / (1000 / 10)) < 1e-9   # 13.0
     assert np.isnan(out[2])
+
+
+def test_zero_risk_stop_fails():
+    p = make_plans(_rows(close=78.0, atr=0.0, window_low=78.0), R.plans, R.gates).iloc[0]
+    assert np.isnan(p["swing_rr"]) and np.isnan(p["position_rr"])
+    assert not p["swing_ok"] and not p["position_ok"] and not p["gate5"]
+
+
+def test_stop_above_entry_fails():
+    p = make_plans(_rows(close=70.0, window_low=78.0), R.plans, R.gates).iloc[0]
+    assert not p["swing_ok"] and not p["position_ok"] and not p["gate5"]
+
+
+def test_nan_atr_no_plan_passes():
+    p = make_plans(_rows(atr=np.nan), R.plans, R.gates).iloc[0]
+    assert not p["swing_ok"] and not p["position_ok"] and not p["gate5"]
+
+
+def test_value_target_wins_over_high_in_position_target():
+    p = make_plans(_rows(val_target=90.0), R.plans, R.gates).iloc[0]
+    assert p["position_target"] == 90
+
+
+def test_swing_target_picks_ma_below_retrace():
+    p = make_plans(_rows(ma=85.0), R.plans, R.gates).iloc[0]
+    assert p["swing_target"] == 85
+
+
+def test_valuation_target_ignores_non_positive_ebitda():
+    d = pd.Timestamp("2024-06-03")
+
+    def f(cols, vals):
+        return pd.DataFrame([vals], index=[d], columns=cols, dtype="float64")
+
+    vf = ValueFeatures(
+        ratio={"pe": f(["A"], [20.0]), "ev_ebitda": f(["A"], [10.0])}, pct={}, peer={},
+        p50={"pe": f(["A"], [15.0]), "ev_ebitda": f(["A"], [8.0])},
+        market_cap=f(["A"], [1000.0]), net_debt=f(["A"], [300.0]), ebitda=f(["A"], [-200.0]),
+    )
+    rows = pd.DataFrame({"date": [d], "symbol": ["A"], "close": [50.0]})
+    out = valuation_target(rows, vf, [["pe", "ev_ebitda"]])
+    assert abs(out[0] - 37.5) < 1e-9

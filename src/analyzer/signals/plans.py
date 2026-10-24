@@ -23,9 +23,12 @@ def valuation_target(rows: pd.DataFrame, vf: ValueFeatures,
         ratio, p50 = pick(vf.ratio[m], rows), pick(vf.p50[m], rows)
         with np.errstate(all="ignore"):
             if m == "ev_ebitda":
-                targets[m] = (p50 * ebitda - nd) / shares
+                t = (p50 * ebitda - nd) / shares
+                t = np.where((ebitda > 0) & (shares > 0), t, np.nan)
             else:
-                targets[m] = close * p50 / ratio
+                t = close * p50 / ratio
+                t = np.where((ratio > 0) & (p50 > 0), t, np.nan)
+            targets[m] = t
     out = np.full(len(rows), np.nan)
     for i, metrics in enumerate(metrics_by_row):
         vals = [targets[m][i] for m in metrics if m in targets and np.isfinite(targets[m][i])]
@@ -59,7 +62,8 @@ def make_plans(rows: pd.DataFrame, plans: PlanRules, gates: GateRules) -> pd.Dat
     out["position_target"] = _closest_above(entry, high, rows["val_target"].to_numpy(dtype="float64"))
     for plan in ("swing", "position"):
         with np.errstate(all="ignore"):
-            rr = (out[f"{plan}_target"] - entry) / (entry - out[f"{plan}_stop"])
+            risk = entry - out[f"{plan}_stop"]
+            rr = ((out[f"{plan}_target"] - entry) / risk).where(risk > 0)
         out[f"{plan}_rr"] = rr
         out[f"{plan}_ok"] = (rr >= gates.min_reward_risk).fillna(False).astype(bool)
     out["gate5"] = out["swing_ok"] | out["position_ok"]
