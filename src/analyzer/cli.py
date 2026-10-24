@@ -166,9 +166,12 @@ def research_run(
         raise _fail(f"--period must be one of: {', '.join(research.PERIODS)}")
     if period == "oos" and rules_path is not None:
         raise _fail("the out-of-sample run uses rules.toml only (rules are fixed in advance)")
-    commit = None
+    commit, dirty_tree = None, False
     if period == "oos":
-        commit, dirty = research.git_state()
+        try:
+            commit, dirty, dirty_tree = research.git_state()
+        except research.GitError as exc:
+            raise _fail(f"cannot verify the repository state for the out-of-sample run: {exc}") from exc
         if dirty:
             raise _fail("rules.toml or the phase-2 addendum has uncommitted changes; commit them "
                         "first so the out-of-sample run is reproducible")
@@ -187,6 +190,20 @@ def research_run(
     finally:
         conn.close()
     s = result.summary
+    if period == "oos":  # log first: a run that was seen is a run that is recorded
+        research.append_oos_log(result, commit, research.OOS_LOG, dirty_tree=dirty_tree)
+        typer.echo(f"logged in {research.OOS_LOG}")
+    if period == "in-sample":
+        typer.echo("IN-SAMPLE (tuning only)")
+    typer.echo(f"guidance_tone_enabled={s['guidance_tone_enabled']} win_basis={s['win_basis']}")
+    cov = s["coverage"]
+    years = cov["members_by_year"]
+    for y in (years[0], years[-1]) if years else ():
+        typer.echo(f"coverage {y['year']}: {y['with_prices']}/{y['members']} members with prices "
+                   f"({y['share']:.0%})")
+    typer.echo(f"excluded by fate: {cov['excluded']}")
+    typer.echo(f"aliases: {cov['aliases']}")
+    typer.echo(f"skipped ticker-days by reason: {cov['skipped_ticker_days']}")
     for group, g in s["groups"].items():
         typer.echo(f"{group:15} n={g['n']:<6} median 63d excess vs SPY={g['median_xs_spy']:+.2%} "
                    f"win rate={g['win_rate']:.1%}")
@@ -195,6 +212,3 @@ def research_run(
     typer.echo(f"verdict: {'PASS' if s['verdict']['passed'] else 'FAIL'}"
                f"{' (in-sample: tuning only)' if period == 'in-sample' else ''}")
     typer.echo(f"report: {result.out_dir}")
-    if period == "oos":
-        research.append_oos_log(result, commit)
-        typer.echo(f"logged in {research.OOS_LOG}")

@@ -1,12 +1,14 @@
 import csv
+import dataclasses
 import json
+import subprocess
 
 import pandas as pd
 import pytest
 from typer.testing import CliRunner
 
 from analyzer.research import run as run_mod
-from analyzer.research.run import append_oos_log, run_research
+from analyzer.research.run import GitError, append_oos_log, git_state, run_research
 from analyzer.signals.evaluate import load_panels
 from tests.fixture_db import DIP, build_fixture_db, fixture_rules
 
@@ -51,7 +53,7 @@ def test_oos_log_appends_one_row(setup, tmp_path):
 
 def test_cli_refuses_oos_with_uncommitted_rules(monkeypatch):
     from analyzer.cli import app
-    monkeypatch.setattr(run_mod, "git_state", lambda *a, **k: ("abc", True))
+    monkeypatch.setattr(run_mod, "git_state", lambda *a, **k: ("abc", True, False))
     result = CliRunner().invoke(app, ["research", "run", "--period", "oos"])
     assert result.exit_code == 2
     assert "uncommitted" in result.output
@@ -62,3 +64,99 @@ def test_cli_refuses_custom_rules_for_oos(tmp_path):
     result = CliRunner().invoke(app, ["research", "run", "--period", "oos", "--rules",
                                       str(tmp_path / "x.toml")])
     assert result.exit_code == 2 and "rules.toml" in result.output
+
+
+def test_in_sample_never_reads_oos_prices(setup):
+    conn, panels, root = setup
+    rules = dataclasses.replace(RULES, research=dataclasses.replace(
+        RULES.research, oos_start="2016-06-01"))
+    res = run_research(conn, rules, "in-sample", root / "out3", panels=panels,
+                       now=pd.Timestamp("2026-10-24 12:00"))
+    events = pd.read_csv(res.out_dir / "events.csv", parse_dates=["date"])
+    assert len(events) and (events["date"] < pd.Timestamp("2016-06-01")).all()
+    assert not set(events["period"]) & {"oos", "oos_incomplete"}
+    assert pd.Timestamp(res.summary["dates"][1]) < pd.Timestamp("2016-06-01")
+    # and when it loads the panels itself
+    res2 = run_research(conn, rules, "in-sample", root / "out4",
+                        now=pd.Timestamp("2026-10-24 12:30"))
+    assert pd.Timestamp(res2.summary["dates"][1]) < pd.Timestamp("2016-06-01")
+
+
+def _repo(tmp_path):
+    def git(*a):
+        subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.com", *a],
+                       cwd=tmp_path, check=True, capture_output=True)
+    git("init", "-q")
+    (tmp_path / "rules.toml").write_text("a = 1\n")
+    (tmp_path / "addendum.md").write_text("x\n")
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "m.py").write_text("x = 1\n")
+    git("add", ".")
+    git("commit", "-q", "-m", "init")
+    return git
+
+
+PATHS = ("rules.toml", "addendum.md")
+
+
+def test_git_state_clean_and_dirty_variants(tmp_path):
+    git = _repo(tmp_path)
+    commit, dirty, tree = git_state(tmp_path, PATHS)
+    assert len(commit) == 40 and not dirty and not tree
+    rules = tmp_path / "rules.toml"
+    rules.write_text("a = 2\n")                       # modified
+    assert git_state(tmp_path, PATHS)[1] is True
+    git("add", "rules.toml")                          # staged
+    assert git_state(tmp_path, PATHS)[1] is True
+    git("commit", "-q", "-m", "c")
+    assert git_state(tmp_path, PATHS)[1] is False
+    rules.unlink()                                    # deleted
+    assert git_state(tmp_path, PATHS)[1] is True
+    git("checkout", "rules.toml")
+    git("rm", "-q", "--cached", "rules.toml")         # untracked
+    assert git_state(tmp_path, PATHS)[1] is True
+
+
+def test_git_state_dirty_tree_flag(tmp_path):
+    _repo(tmp_path)
+    (tmp_path / "src" / "m.py").write_text("x = 2\n")
+    _, dirty, tree = git_state(tmp_path, PATHS)
+    assert tree is True and dirty is False
+
+
+def test_git_state_outside_a_repo_raises(tmp_path):
+    with pytest.raises(GitError):
+        git_state(tmp_path, PATHS)
+
+
+def test_cli_reports_git_failure(monkeypatch):
+    from analyzer.cli import app
+
+    def boom(*a, **k):
+        raise GitError("no git")
+    monkeypatch.setattr(run_mod, "git_state", boom)
+    result = CliRunner().invoke(app, ["research", "run", "--period", "oos"])
+    assert result.exit_code == 2 and "no git" in result.output
+
+
+def test_cli_oos_success_logs_before_printing(setup, tmp_path, monkeypatch):
+    from analyzer.cli import app
+    conn, _panels, root = setup
+    data = tmp_path / "data"
+    data.mkdir()
+    build_fixture_db(data / "analyzer.db").close()
+    real = run_mod.PROJECT_ROOT / "docs" / "research" / "oos-runs.csv"
+    before = real.read_bytes()
+    log = tmp_path / "oos-runs.csv"
+    monkeypatch.setattr(run_mod, "OOS_LOG", log)
+    monkeypatch.setattr(run_mod, "git_state", lambda *a, **k: ("stubbed", False, True))
+    monkeypatch.setenv("SEC_USER_AGENT", "Test tester@corp.test")
+    monkeypatch.setenv("ANALYZER_DATA_DIR", str(data))
+    result = CliRunner().invoke(app, ["research", "run", "--period", "oos"])
+    assert result.exit_code == 0, result.output
+    rows = list(csv.DictReader(log.open()))
+    assert len(rows) == 1 and rows[0]["commit"] == "stubbed" and rows[0]["dirty_tree"] == "True"
+    assert "coverage" in result.output and "win_basis" in result.output
+    assert result.output.index("logged in") < result.output.index("verdict:")
+    assert real.read_bytes() == before
+    assert list((data / "research").iterdir())
