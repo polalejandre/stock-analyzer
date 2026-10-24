@@ -42,8 +42,12 @@ def _frames(result) -> dict[str, pd.DataFrame]:
 
 
 def assert_truncation_invariant(compute, cut_dates) -> None:
-    """`compute(end)` must build its result from inputs cut at `end` (None = full data). The row
-    at each cut date must be identical whether or not later data exists."""
+    """`compute(end)` must build its result from inputs cut at `end` (None = full data): it must
+    apply `cut` to its raw inputs before any calculation. Slicing a full-data result afterwards
+    defeats the check. The row at each cut date must be identical whether or not later data
+    exists."""
+    cut_dates = list(cut_dates)
+    assert cut_dates, "cut_dates must not be empty"
     full = _frames(compute(None))
     assert full, "compute returned no frames"
     for d in cut_dates:
@@ -52,4 +56,5 @@ def assert_truncation_invariant(compute, cut_dates) -> None:
         for name, frame in full.items():
             pd.testing.assert_series_equal(
                 frame.loc[d], part[name].loc[d], check_names=False, check_dtype=False,
+                check_exact=False, rtol=1e-9, atol=1e-12,
                 obj=f"{name} at {d.date()}")
