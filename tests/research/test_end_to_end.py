@@ -14,9 +14,9 @@ def test_cli_in_sample_run_on_the_fixture(tmp_path, monkeypatch):
     build_fixture_db(data / "analyzer.db").close()
     monkeypatch.setenv("SEC_USER_AGENT", "Test test@test.invalid")
     monkeypatch.setenv("ANALYZER_DATA_DIR", str(data))
-    rules = tmp_path / "rules.toml"
+    rules = tmp_path / "rules.toml"   # a tuning copy: [research] must match the committed one
     rules.write_text((PROJECT_ROOT / "rules.toml").read_text().replace(
-        'panel_start = "2009-01-01"', 'panel_start = "2012-01-01"'))
+        "min_drawdown = 0.15", "min_drawdown = 0.149"))
     oos_before = OOS_LOG.read_bytes()
     started = time.monotonic()
     result = CliRunner().invoke(app, ["research", "run", "--rules", str(rules)])

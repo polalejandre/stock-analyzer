@@ -159,6 +159,8 @@ def research_run(
     rules_path: Path = typer.Option(None, "--rules", help="Another rules file (in-sample only)."),
 ) -> None:
     """Replay the strategy over history and write a report under data/research/."""
+    import pandas as pd
+
     from analyzer.config import PROJECT_ROOT
     from analyzer.research import run as research
 
@@ -181,12 +183,28 @@ def research_run(
     except Exception as exc:
         reason = str(exc) if isinstance(exc, ConfigError) else f"{type(exc).__name__}: {exc}"
         raise _fail(f"Configuration error: {reason}") from exc
+    if rules_path is not None:
+        # tuning may change thresholds, never the split, purge or go/no-go settings: an
+        # in-sample run with another oos_start would read out-of-sample prices unlogged
+        try:
+            committed = research.committed_research_rules()
+        except research.GitError as exc:
+            raise _fail(f"cannot read the committed rules.toml to check --rules: {exc}") from exc
+        if rules.research != committed:
+            raise _fail("the [research] section of --rules differs from the committed rules.toml; "
+                        "split dates, purge and go/no-go settings are fixed, so change only the "
+                        "other sections")
     if not settings.db_path.exists():
         raise _fail("no database yet — run `analyzer update` first")
     conn = connect(settings.db_path)
+    now = pd.Timestamp.now()
     try:
         migrate(conn)
-        result = research.run_research(conn, rules, period, settings.data_dir / "research")
+        if period == "oos":  # on record before any out-of-sample data is read, even if it crashes
+            research.append_oos_started(research.run_id_for(now, period), rules.version, commit,
+                                        research.OOS_LOG, dirty_tree=dirty_tree)
+        result = research.run_research(conn, rules, period, settings.data_dir / "research",
+                                       now=now)
     finally:
         conn.close()
     s = result.summary

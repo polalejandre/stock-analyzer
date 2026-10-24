@@ -160,8 +160,54 @@ def test_cli_oos_success_logs_before_printing(setup, tmp_path, monkeypatch):
     result = CliRunner().invoke(app, ["research", "run", "--period", "oos"])
     assert result.exit_code == 0, result.output
     rows = list(csv.DictReader(log.open()))
-    assert len(rows) == 1 and rows[0]["commit"] == "stubbed" and rows[0]["dirty_tree"] == "True"
+    assert [r["verdict"] for r in rows] == ["started", "fail"]      # started row, then the result
+    assert rows[0]["run_id"] == rows[1]["run_id"] and rows[0]["n"] == ""
+    assert all(r["commit"] == "stubbed" and r["dirty_tree"] == "True" for r in rows)
     assert "coverage" in result.output and "win_basis" in result.output
     assert result.output.index("logged in") < result.output.index("verdict:")
     assert real.read_bytes() == before
     assert list((data / "research").iterdir())
+
+
+def test_cli_refuses_rules_whose_research_section_differs(tmp_path, monkeypatch):
+    from analyzer.cli import app
+    data = tmp_path / "data"
+    build_fixture_db(data / "analyzer.db").close()
+    monkeypatch.setenv("SEC_USER_AGENT", "Test tester@corp.test")
+    monkeypatch.setenv("ANALYZER_DATA_DIR", str(data))
+    text = (run_mod.PROJECT_ROOT / "rules.toml").read_text()
+    moved = tmp_path / "moved.toml"
+    moved.write_text(text.replace('oos_start = "2022-01-01"', 'oos_start = "2026-01-01"'))
+    result = CliRunner().invoke(app, ["research", "run", "--rules", str(moved)])
+    assert result.exit_code == 2 and "[research]" in result.output
+    assert not (data / "research").exists()                 # refused before anything ran
+
+
+def test_committed_research_rules_need_git(tmp_path):
+    with pytest.raises(GitError):
+        run_mod.committed_research_rules(tmp_path)
+
+
+def test_cli_oos_crash_after_start_leaves_the_started_row(tmp_path, monkeypatch):
+    from analyzer.cli import app
+    data = tmp_path / "data"
+    build_fixture_db(data / "analyzer.db").close()
+    real = run_mod.PROJECT_ROOT / "docs" / "research" / "oos-runs.csv"
+    before = real.read_bytes()
+    log = tmp_path / "oos-runs.csv"
+    monkeypatch.setattr(run_mod, "OOS_LOG", log)
+    monkeypatch.setattr(run_mod, "git_state", lambda *a, **k: ("abc", False, False))
+
+    def crash(*a, **k):
+        assert list(csv.DictReader(log.open()))[0]["verdict"] == "started"   # logged before
+        raise RuntimeError("boom after reading out-of-sample prices")
+    monkeypatch.setattr(run_mod, "run_research", crash)
+    monkeypatch.setenv("SEC_USER_AGENT", "Test tester@corp.test")
+    monkeypatch.setenv("ANALYZER_DATA_DIR", str(data))
+    result = CliRunner().invoke(app, ["research", "run", "--period", "oos"])
+    assert result.exit_code != 0 and isinstance(result.exception, RuntimeError)
+    rows = list(csv.DictReader(log.open()))
+    assert len(rows) == 1 and rows[0]["verdict"] == "started" and rows[0]["commit"] == "abc"
+    assert rows[0]["run_id"].endswith("-oos") and rows[0]["rules_version"]
+    assert list(rows[0]) == run_mod.OOS_FIELDS
+    assert real.read_bytes() == before

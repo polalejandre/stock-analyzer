@@ -12,7 +12,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from analyzer.config import PROJECT_ROOT, Rules
+from analyzer.config import PROJECT_ROOT, ResearchRules, Rules, parse_rules
 from analyzer.research.coverage import coverage
 from analyzer.research.events import (
     GROUP_DISLOCATED,
@@ -67,11 +67,24 @@ def git_state(root: Path = PROJECT_ROOT, paths=FROZEN_PATHS) -> tuple[str, bool,
     return head.stdout.strip(), dirty, bool(tree.stdout.strip())
 
 
+def committed_research_rules(root: Path = PROJECT_ROOT) -> ResearchRules:
+    """The [research] section of rules.toml as committed at HEAD. Raises GitError when git cannot
+    answer."""
+    shown = _git(root, "show", "HEAD:rules.toml")
+    if shown.returncode != 0:
+        raise GitError(f"git show HEAD:rules.toml failed: {shown.stderr.strip()}")
+    return parse_rules(shown.stdout).research
+
+
 @dataclass
 class RunResult:
     run_id: str
     out_dir: Path
     summary: dict
+
+
+def run_id_for(now: pd.Timestamp, period: str) -> str:
+    return f"{now:%Y%m%d-%H%M%S}-{PERIODS[period]}"
 
 
 def run_research(conn, rules: Rules, period: str, out_root: Path, *, panels=None,
@@ -112,7 +125,7 @@ def run_research(conn, rules: Rules, period: str, out_root: Path, *, panels=None
     if key == "in_sample":
         v["note"] = "in-sample: for tuning only; the go/no-go is judged out of sample"
 
-    run_id = f"{now:%Y%m%d-%H%M%S}-{key}"
+    run_id = run_id_for(now, period)
     out_dir = Path(out_root) / run_id
     out_dir.mkdir(parents=True, exist_ok=True)
     events.to_csv(out_dir / "events.csv", index=False)
@@ -149,17 +162,30 @@ def _json(value):
     return str(value)
 
 
+def append_oos_started(run_id: str, rules_version: str, commit: str, path: Path | None = None,
+                       dirty_tree: bool = False) -> None:
+    """The row written before an out-of-sample run starts (verdict "started", no metrics), so a
+    run that crashes after reading out-of-sample data is still on record."""
+    _append_oos_row({"run_date": run_id[:8], "run_id": run_id, "rules_version": rules_version,
+                     "commit": commit, "n": "", "median_xs_spy": "", "win_rate": "",
+                     "dislocated_median_xs_spy": "", "verdict": "started",
+                     "dirty_tree": dirty_tree}, path)
+
+
 def append_oos_log(result: RunResult, commit: str, path: Path | None = None,
                    dirty_tree: bool = False) -> None:
-    path = path or OOS_LOG
     s = result.summary
     setup, dislocated = s["groups"][GROUP_SETUP], s["groups"][GROUP_DISLOCATED]
-    row = {"run_date": result.run_id[:8], "run_id": result.run_id,
-           "rules_version": s["rules_version"], "commit": commit, "n": setup["n"],
-           "median_xs_spy": setup["median_xs_spy"], "win_rate": setup["win_rate"],
-           "dislocated_median_xs_spy": dislocated["median_xs_spy"],
-           "verdict": "pass" if s["verdict"]["passed"] else "fail",
-           "dirty_tree": dirty_tree}
+    _append_oos_row({"run_date": result.run_id[:8], "run_id": result.run_id,
+                     "rules_version": s["rules_version"], "commit": commit, "n": setup["n"],
+                     "median_xs_spy": setup["median_xs_spy"], "win_rate": setup["win_rate"],
+                     "dislocated_median_xs_spy": dislocated["median_xs_spy"],
+                     "verdict": "pass" if s["verdict"]["passed"] else "fail",
+                     "dirty_tree": dirty_tree}, path)
+
+
+def _append_oos_row(row: dict, path: Path | None) -> None:
+    path = path or OOS_LOG
     new = not Path(path).exists() or Path(path).stat().st_size == 0
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     with Path(path).open("a", newline="") as fh:

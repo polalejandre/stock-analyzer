@@ -225,7 +225,12 @@ def _section(cls, table: dict, name: str, nested: dict | None = None):
 
 
 def load_rules(path: Path = PROJECT_ROOT / "rules.toml") -> Rules:
-    data = tomllib.loads(path.read_text())
+    return parse_rules(path.read_text())
+
+
+def parse_rules(text: str) -> Rules:
+    """Rules from the text of a rules.toml file."""
+    data = tomllib.loads(text)
     v = data["variants"]
     variants = _section(VariantRules, v, "variants", nested={
         "financials": _section(FinancialsRules, v["financials"], "variants.financials"),
