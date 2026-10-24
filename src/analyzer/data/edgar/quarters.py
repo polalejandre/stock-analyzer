@@ -79,10 +79,10 @@ def _as_first_reported(d: pd.DataFrame) -> pd.DataFrame:
             .drop(columns=["_late", "_order"]))
 
 
-def discrete_quarters(df: pd.DataFrame, additive: bool = True) -> pd.DataFrame:
-    """Discrete quarters from facts that may hold several filed versions of one period."""
-    if df.empty:
-        return _frame([])
+def _candidates(df: pd.DataFrame, additive: bool, point_in_time: bool) -> list[_Quarter]:
+    """Direct quarters and year-to-date differences. Point in time, a derived candidate is kept
+    even where a direct quarter exists, and a chain link is the first-filed fact of its period end
+    (a later re-filing with a drifted start cannot move when the difference became known)."""
     d = _as_first_reported(df.dropna(subset=["period_start"]))
     d["days"] = (d["period_end"] - d["period_start"]).dt.days + 1
     candidates: list[_Quarter] = []
@@ -94,11 +94,11 @@ def discrete_quarters(df: pd.DataFrame, additive: bool = True) -> pd.DataFrame:
     if additive and not ytd.empty:
         ytd["chain"] = _chain_keys(ytd["period_start"])
         for _key, chain in ytd.groupby("chain"):
-            links = chain.sort_values(["period_end", "filed"]).drop_duplicates(
-                "period_end", keep="last")
+            links = chain.sort_values(["period_end", "filed", "period_start"]).drop_duplicates(
+                "period_end", keep="first" if point_in_time else "last")
             prev = None
             for r in links.itertuples():
-                if (prev is not None and r.period_end not in direct_ends
+                if (prev is not None and (point_in_time or r.period_end not in direct_ends)
                         and _is_quarter((r.period_end - prev.period_end).days)):
                     candidates.append(_Quarter(
                         prev.period_end + pd.Timedelta(days=1),
@@ -108,4 +108,24 @@ def discrete_quarters(df: pd.DataFrame, additive: bool = True) -> pd.DataFrame:
                         True,
                     ))
                 prev = r
-    return _frame(_one_per_quarter(candidates))
+    return candidates
+
+
+def discrete_quarters(df: pd.DataFrame, additive: bool = True) -> pd.DataFrame:
+    """Discrete quarters from facts that may hold several filed versions of one period: one per
+    quarter, direct beating derived whatever the filing dates (the audit's view of the data)."""
+    if df.empty:
+        return _frame([])
+    return _frame(_one_per_quarter(_candidates(df, additive, point_in_time=False)))
+
+
+def quarter_candidates(df: pd.DataFrame, additive: bool = True) -> pd.DataFrame:
+    """Every candidate value of every quarter, direct and derived, each with its own filed date,
+    sorted by filing. The point-in-time path (`panel.steps.quarter_steps`) uses the earliest-known
+    candidate first and lets a later one replace it only from its own filed date, so a quarter
+    first reported directly years after it was derivable is not hidden until then."""
+    if df.empty:
+        return _frame([])
+    out = _frame(_candidates(df, additive, point_in_time=True))
+    return (out.sort_values(["filed", "period_end", "derived", "period_start", "value"], kind="stable")
+            .reset_index(drop=True))

@@ -18,7 +18,7 @@ import pandas as pd
 from analyzer.config import FeatureRules
 from analyzer.data.edgar.facts_read import load_concept
 from analyzer.data.edgar.merges import load_cik_merges
-from analyzer.data.edgar.quarters import discrete_quarters
+from analyzer.data.edgar.quarters import quarter_candidates
 from analyzer.data.edgar.tags import CONCEPT_BY_NAME
 from analyzer.panel.steps import (
     add_missing_periods,
@@ -85,14 +85,14 @@ def company_steps(conn, cik: int, merges: Mapping[int, Sequence[int]] | None = N
     for prefix, concept in DURATIONS.items():
         f = facts(concept)
         ff = first_versions(f)
-        q = discrete_quarters(ff)
+        q = quarter_candidates(ff)
         if concept in NON_NEGATIVE:
             q = q[~(q["derived"] & (q["value"] < 0))]
         annual_facts = ff
         if concept == "revenue":  # banks: NII + noninterest income where no revenue tag exists
             nii = first_versions(facts("net_interest_income"))
             non = first_versions(facts("noninterest_income"))
-            q = add_missing_periods(q, sum_periods(discrete_quarters(nii), discrete_quarters(non)))
+            q = add_missing_periods(q, sum_periods(quarter_candidates(nii), quarter_candidates(non)))
             bank_annual = sum_periods(nii.assign(days=0, derived=False),
                                       non.assign(days=0, derived=False))
             if len(bank_annual):

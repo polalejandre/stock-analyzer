@@ -1,8 +1,8 @@
 """Point-in-time step series: one row per filing date, holding what was known after it.
 
-Every value enters on its `filed` date. A quarter's value is the version `discrete_quarters`
-keeps (the first report, or an amendment within a year), so it enters no earlier than that
-version's filing. Annual and balance-sheet values keep their first report; later restatements
+Every value enters on its `filed` date. A quarter's candidates (`quarter_candidates`: direct and
+derived, each from first-reported facts) enter in filing order, the later replacing the earlier
+from its own filing. Annual and balance-sheet values keep their first report; later restatements
 are ignored, which is conservative: nothing is ever known before it was filed.
 """
 
@@ -55,11 +55,22 @@ def _year_ago(known: dict[pd.Timestamp, float], end: pd.Timestamp | None) -> flo
 
 def quarter_steps(quarters: pd.DataFrame,
                   fallback_ends: frozenset = frozenset()) -> pd.DataFrame:
+    """One row per filing date. `quarters` may hold several candidates per quarter (from
+    `quarter_candidates`): they are applied in filing order, so the earliest-known value is used
+    first and a later candidate replaces it only from its own filed date. On one filing date a
+    direct quarter is applied after (so wins over) a derived one, and among equals the one with
+    the latest end, then the latest start."""
     if quarters.empty:
         return _empty(QUARTER_COLUMNS)
     known: dict[pd.Timestamp, float] = {}
     rows = []
-    for filed, batch in quarters.sort_values(["filed", "period_end"]).groupby("filed", sort=True):
+    q = quarters.assign(_direct=~quarters["derived"].astype(bool)) if "derived" in quarters \
+        else quarters.assign(_direct=True)
+    # a total order, so ties never depend on input order: the latest start (shortest period)
+    # among same-day candidates for one end is applied last
+    keys = [k for k in ("filed", "_direct", "period_end", "period_start", "value") if k in q]
+    order = q.sort_values(keys, kind="stable")
+    for filed, batch in order.groupby("filed", sort=True):
         for end, value in zip(batch["period_end"], batch["value"], strict=True):
             for k in [k for k in known if k != end and abs((k - end).days) <= SAME_QUARTER_DAYS]:
                 del known[k]      # the same quarter with a slightly different end: newest key wins
@@ -193,7 +204,7 @@ def latest_value_steps(facts: pd.DataFrame) -> pd.DataFrame:
 
 def first_versions(facts: pd.DataFrame) -> pd.DataFrame:
     """The earliest filed version of each (period_start, period_end), ties by accession. Feed
-    this to `discrete_quarters` and `annual_steps` so a value enters on its first report and a
+    this to `quarter_candidates` and `annual_steps` so a value enters on its first report and a
     later re-report (a 10-K repeating a quarter) cannot change when it became known."""
     if facts.empty:
         return facts

@@ -217,3 +217,32 @@ def test_failed_companies_are_counted_in_one_warning(tmp_path, caplog, monkeypat
                                 RULES)
     assert any("failed for 1 of 1" in r.getMessage() and "AAA" in r.getMessage()
                for r in caplog.records)
+
+
+def test_quarter_reported_directly_years_later_keeps_its_early_derived_value(tmp_path):
+    """HAIN: Q4 FY2015 is derivable from the FY2015 10-K; a restated 10-K filed in 2017 reports it
+    directly. Before 2017 the derived value must be used, with or without the later filing."""
+    conn = _db(tmp_path)
+    for start, end, value, filed in [
+            ("2014-07-01", "2014-09-30", 10, "2014-11-01"), ("2014-10-01", "2014-12-31", 11, "2015-02-01"),
+            ("2015-01-01", "2015-03-31", 12, "2015-05-01"), ("2014-07-01", "2015-03-31", 33, "2015-05-01"),
+            ("2014-07-01", "2015-06-30", 46, "2015-08-21"), ("2015-04-01", "2015-06-30", 14, "2017-06-22")]:
+        _fact(conn, "revenue", "us-gaap:Revenues", start, end, value, filed)
+    conn.commit()
+    dates = pd.bdate_range("2015-01-01", "2017-12-29")
+    full = load_fundamental_panels(conn, _entities(), dates, RULES)
+    rev = full["revenue_ttm"]["AAA"]
+    assert rev.loc["2016-01-04"] == 46 and not full["annual"]["AAA"].loc["2016-01-04"]
+    assert full["revenue_q0"]["AAA"].loc["2016-01-04"] == 13
+    assert full["revenue_q0"]["AAA"].loc["2017-06-22"] == 14
+
+    def compute(end):
+        if end is None:
+            return full.frames
+        cut_db = _db(tmp_path / f"c{end.date()}")
+        rows = [r for r in conn.execute("SELECT * FROM facts") if r[7] <= end.date().isoformat()]
+        cut_db.executemany(f"INSERT INTO facts VALUES ({', '.join('?' * len(rows[0]))})", rows)
+        cut_db.commit()
+        return load_fundamental_panels(cut_db, _entities(), dates, RULES).upto(end).frames
+
+    assert_truncation_invariant(compute, ["2015-09-01", "2016-01-04", "2017-06-22"])

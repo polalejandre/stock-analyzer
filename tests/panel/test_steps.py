@@ -2,7 +2,7 @@ import math
 
 import pandas as pd
 
-from analyzer.data.edgar.quarters import discrete_quarters
+from analyzer.data.edgar.quarters import discrete_quarters, quarter_candidates
 from analyzer.panel.steps import (
     add_missing_periods,
     annual_steps,
@@ -343,3 +343,68 @@ def test_instant_value_filed_ignores_older_dates_first_reported_later():
     s = instant_steps(f).set_index("filed")
     assert s.loc[T("2025-03-01"), "period_end"] == T("2023-12-31")
     assert s.loc[T("2025-03-01"), "value_filed"] == T("2024-02-01")
+
+
+# ---- final review I1: a quarter derivable early but reported directly years later ---------------
+
+LATE_DIRECT = _facts([  # June fiscal year (HAIN): Q4 FY2015 derivable from the FY2015 10-K
+    ("2014-07-01", "2014-09-30", 10, "2014-11-01"),
+    ("2014-10-01", "2014-12-31", 11, "2015-02-01"),
+    ("2015-01-01", "2015-03-31", 12, "2015-05-01"),
+    ("2014-07-01", "2015-03-31", 33, "2015-05-01"),
+    ("2014-07-01", "2015-06-30", 46, "2015-08-21"),   # FY2015 10-K: derived Q4 = 13
+    ("2015-04-01", "2015-06-30", 14, "2017-06-22"),   # restated 10-K reports Q4 directly, years later
+])
+
+
+def test_quarter_candidates_keep_direct_and_derived_with_their_own_filing():
+    c = quarter_candidates(LATE_DIRECT)
+    q4 = c[c["period_end"] == T("2015-06-30")]
+    assert q4["derived"].tolist() == [True, False]
+    assert q4["filed"].tolist() == [T("2015-08-21"), T("2017-06-22")]
+    assert q4["value"].tolist() == [13, 14]
+    assert c["filed"].is_monotonic_increasing
+    q = discrete_quarters(LATE_DIRECT)                     # the audit view is unchanged
+    assert q[q["period_end"] == T("2015-06-30")]["derived"].tolist() == [False]
+
+
+def test_late_direct_quarter_replaces_the_derived_one_only_from_its_filing():
+    s = quarter_steps(quarter_candidates(LATE_DIRECT)).set_index("filed")
+    assert s.loc[T("2015-08-21"), "ttm"] == 46 and s.loc[T("2015-08-21"), "q0"] == 13
+    assert s.loc[T("2017-06-22"), "q0"] == 14 and s.loc[T("2017-06-22"), "ttm"] == 47
+
+
+def test_late_direct_quarter_is_truncation_invariant():
+    def build(f):
+        return quarter_steps(quarter_candidates(f))
+    _assert_invariant(build, [LATE_DIRECT], ["2015-05-01", "2015-08-21", "2016-03-01", "2017-06-22"])
+
+
+def test_same_day_direct_quarter_wins_over_derived():
+    f = _facts([("2023-01-01", "2023-03-31", 10, "2023-05-01"),
+                ("2023-04-01", "2023-06-30", 11, "2023-08-01"),
+                ("2023-01-01", "2023-06-30", 22, "2023-08-01")])   # derived Q2 = 12, same filing
+    s = quarter_steps(quarter_candidates(f)).set_index("filed")
+    assert s.loc[T("2023-08-01"), "q0"] == 11
+    assert quarter_steps(quarter_candidates(f.iloc[::-1])).equals(quarter_steps(quarter_candidates(f)))
+
+
+def test_drifted_start_refiling_of_a_link_does_not_move_the_derived_quarter():
+    # RBC: the FY 10-K gives Q4 = FY - 9M; years later a comparative re-files FY with a start one
+    # day off. Point in time the first-filed link of each period end is used.
+    f = _facts([("2017-04-02", "2017-12-30", 495, "2018-02-06"),
+                ("2017-04-02", "2018-03-31", 675, "2018-05-30"),
+                ("2017-04-01", "2018-03-31", 675, "2020-05-20")])
+    c = quarter_candidates(f)
+    assert c["filed"].tolist() == [T("2018-05-30")] and c["value"].tolist() == [180]
+    _assert_invariant(lambda x: quarter_steps(quarter_candidates(x)), [f],
+                      ["2018-05-30", "2019-01-01", "2020-05-20"])
+
+
+def test_same_day_candidates_for_one_quarter_do_not_depend_on_input_order():
+    # SUN: one 10-K tags Q4 twice, a 92-day quarter and a 97-day stub; the shortest period wins
+    f = _facts([("2012-09-26", "2012-12-31", 9150, "2013-03-29"),
+                ("2012-10-01", "2012-12-31", 8576, "2013-03-29")])
+    for rows in (f, f.iloc[::-1]):
+        s = quarter_steps(quarter_candidates(rows))
+        assert s["q0"].tolist() == [8576]
