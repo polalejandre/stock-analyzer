@@ -43,8 +43,11 @@ DURATIONS = {  # panel prefix -> concept
 NON_NEGATIVE = {"revenue", "capex", "depreciation_amortization"}
 FLAGGED = ("revenue", "operating_income", "net_income", "ocf", "capex")  # feed annual/fallback
 QUARTER_FIELDS = ("revenue_q0", "revenue_q0_ly", "revenue_q1", "revenue_q1_ly")
+# `<prefix>_ttm_ly` / `equity_avg_ly`: the same figure one year earlier, as known on the day
+# (panel.steps); YoY features compare with these
+YEAR_AGO_FIELDS = (*(f"{p}_ttm_ly" for p in DURATIONS), "equity_avg_ly")
 FIELDS = (*(f"{p}_ttm" for p in DURATIONS), *QUARTER_FIELDS,
-          "equity", "equity_avg", "cash", "debt", "shares")
+          "equity", "equity_avg", "cash", "debt", "shares", *YEAR_AGO_FIELDS)
 FLAGS = ("annual", "fallback", "diluted_shares")
 
 
@@ -150,6 +153,8 @@ def _company_columns(steps: dict[str, pd.DataFrame], dates: pd.DatetimeIndex,
         values, idx = _asof(s, dates, "ttm")
         fresh = _fresh(s, idx, dates, "value_filed", rules.ttm_max_age_days)
         cols[f"{prefix}_ttm"] = np.where(fresh, values, np.nan)
+        year_ago, _ = _asof(s, dates, "ttm_ly")      # ages with the TTM value it is paired with
+        cols[f"{prefix}_ttm_ly"] = np.where(fresh, year_ago, np.nan)
         if prefix == "revenue":
             for q in ("q0", "q0_ly", "q1", "q1_ly"):
                 qv, qidx = _asof(s, dates, q)
@@ -167,6 +172,8 @@ def _company_columns(steps: dict[str, pd.DataFrame], dates: pd.DatetimeIndex,
         if name == "equity":
             avg, _ = _asof(s, dates, "avg5")
             cols["equity_avg"] = np.where(np.isnan(cols["equity"]), np.nan, avg)
+            avg_ly, _ = _asof(s, dates, "avg5_ly")
+            cols["equity_avg_ly"] = np.where(np.isnan(cols["equity"]), np.nan, avg_ly)
     cover = _split_adjusted(steps["shares_cover"], splits)
     diluted = _split_adjusted(steps["shares_diluted"], splits, basis="filed")
     cv, cidx = _asof(cover, dates, "value")

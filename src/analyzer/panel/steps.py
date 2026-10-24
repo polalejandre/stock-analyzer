@@ -23,11 +23,16 @@ TOTAL_DEBT_TAG = "us-gaap:LongTermDebt"   # includes the current portion
 SEPARATE_SHORT_TAGS = {"us-gaap:ShortTermBorrowings", "us-gaap:CommercialPaper"}
 _DT = "datetime64[ns]"
 
-QUARTER_COLUMNS = ["filed", "period_end", "ttm", "q0", "q0_ly", "q1", "q1_ly", "fallback"]
-ANNUAL_COLUMNS = ["filed", "period_end", "ttm", "fallback"]
-TTM_COLUMNS = ["filed", "value_filed", "period_end", "ttm", "q0", "q0_ly", "q1", "q1_ly",
-               "fallback", "annual", "q_filed"]
-INSTANT_COLUMNS = ["filed", "period_end", "value", "avg5", "value_filed"]
+# `*_ly` columns are the same figure one year earlier, as known at the same filing: the TTM of
+# the four quarters ending a year before q0 (or the prior fiscal year), the balance-sheet average
+# ending a year before the latest date. YoY features compare with these, never with a panel value
+# shifted by a fixed number of days, which can pair periods that are not a year apart.
+QUARTER_COLUMNS = ["filed", "period_end", "ttm", "ttm_ly", "q0", "q0_ly", "q1", "q1_ly",
+                   "fallback"]
+ANNUAL_COLUMNS = ["filed", "period_end", "ttm", "ttm_ly", "fallback"]
+TTM_COLUMNS = ["filed", "value_filed", "period_end", "ttm", "ttm_ly", "q0", "q0_ly", "q1",
+               "q1_ly", "fallback", "annual", "q_filed"]
+INSTANT_COLUMNS = ["filed", "period_end", "value", "avg5", "avg5_ly", "value_filed"]
 LATEST_COLUMNS = ["filed", "period_end", "value"]
 PERIOD_COLUMNS = ["period_start", "period_end", "value", "filed", "days", "derived"]
 
@@ -45,12 +50,29 @@ def _consecutive(ends: list[pd.Timestamp]) -> bool:
                for a, b in zip(ends, ends[1:], strict=False))
 
 
-def _year_ago(known: dict[pd.Timestamp, float], end: pd.Timestamp | None) -> float:
-    if end is None:
-        return math.nan
+def _year_ago_end(ends, end: pd.Timestamp | None) -> pd.Timestamp | None:
+    """The known period end closest to `end` - 365 days, if within YEAR_TOLERANCE_DAYS."""
+    if end is None or not ends:
+        return None
     target = end - pd.Timedelta(days=365)
-    best = min(known, key=lambda e: abs((e - target).days))
-    return known[best] if abs((best - target).days) <= YEAR_TOLERANCE_DAYS else math.nan
+    best = min(ends, key=lambda e: abs((e - target).days))
+    return best if abs((best - target).days) <= YEAR_TOLERANCE_DAYS else None
+
+
+def _year_ago(known: dict[pd.Timestamp, float], end: pd.Timestamp | None) -> float:
+    best = _year_ago_end(known, end)
+    return known[best] if best is not None else math.nan
+
+
+def _ttm_year_ago(known: dict[pd.Timestamp, float], ends: list[pd.Timestamp],
+                  q0: pd.Timestamp) -> float:
+    """Sum of the four consecutive quarters ending about a year before q0."""
+    best = _year_ago_end(ends, q0)
+    if best is None:
+        return math.nan
+    i = ends.index(best)
+    four = ends[i - 3:i + 1] if i >= 3 else []
+    return sum(known[e] for e in four) if len(four) == 4 and _consecutive(four) else math.nan
 
 
 def quarter_steps(quarters: pd.DataFrame,
@@ -81,7 +103,7 @@ def quarter_steps(quarters: pd.DataFrame,
         q0 = ends[-1]
         q1 = ends[-2] if len(ends) >= 2 and _consecutive(ends[-2:]) else None
         rows.append((filed, q0, sum(known[e] for e in last4) if complete else math.nan,
-                     known[q0], _year_ago(known, q0),
+                     _ttm_year_ago(known, ends, q0), known[q0], _year_ago(known, q0),
                      known[q1] if q1 is not None else math.nan, _year_ago(known, q1),
                      any(e in fallback_ends for e in last4)))
     return pd.DataFrame(rows, columns=QUARTER_COLUMNS)
@@ -100,7 +122,7 @@ def annual_steps(facts: pd.DataFrame, fallback_ends: frozenset = frozenset()) ->
         for end, value in zip(batch["period_end"], batch["value"], strict=True):
             known[end] = float(value)
         last = max(known)
-        rows.append((filed, last, known[last], last in fallback_ends))
+        rows.append((filed, last, known[last], _year_ago(known, last), last in fallback_ends))
     return pd.DataFrame(rows, columns=ANNUAL_COLUMNS) if rows else _empty(ANNUAL_COLUMNS)
 
 
@@ -115,7 +137,8 @@ def combine_ttm(qsteps: pd.DataFrame, asteps: pd.DataFrame) -> pd.DataFrame:
         return _empty(TTM_COLUMNS)
     base = pd.DataFrame({"filed": pd.to_datetime(filed).astype(_DT)})
     q = qsteps.assign(q_filed=qsteps["filed"]).sort_values("filed")
-    a = (asteps.rename(columns={"period_end": "a_end", "ttm": "a_ttm", "fallback": "a_fallback"})
+    a = (asteps.rename(columns={"period_end": "a_end", "ttm": "a_ttm", "ttm_ly": "a_ttm_ly",
+                                "fallback": "a_fallback"})
          .assign(a_filed=asteps["filed"]).sort_values("filed"))
     if len(q):
         qq = pd.merge_asof(base, q, on="filed")
@@ -126,7 +149,8 @@ def combine_ttm(qsteps: pd.DataFrame, asteps: pd.DataFrame) -> pd.DataFrame:
     if len(a):
         aa = pd.merge_asof(base, a, on="filed")
     else:
-        aa = base.assign(a_end=pd.NaT, a_ttm=np.nan, a_fallback=False, a_filed=pd.NaT).astype(
+        aa = base.assign(a_end=pd.NaT, a_ttm=np.nan, a_ttm_ly=np.nan, a_fallback=False,
+                         a_filed=pd.NaT).astype(
             {"a_end": _DT, "a_filed": _DT, "a_fallback": "boolean"})
     has_annual = aa["a_ttm"].notna()
     margin = pd.Timedelta(days=SAME_QUARTER_DAYS)
@@ -137,6 +161,7 @@ def combine_ttm(qsteps: pd.DataFrame, asteps: pd.DataFrame) -> pd.DataFrame:
         "value_filed": pd.to_datetime(np.where(use_annual, aa["a_filed"], qq["q_filed"])).astype(_DT),
         "period_end": pd.to_datetime(np.where(use_annual, aa["a_end"], qq["period_end"])).astype(_DT),
         "ttm": np.where(use_annual, aa["a_ttm"], qq["ttm"]).astype("float64"),
+        "ttm_ly": np.where(use_annual, aa["a_ttm_ly"], qq["ttm_ly"]).astype("float64"),
         "q0": qq["q0"].astype("float64"), "q0_ly": qq["q0_ly"].astype("float64"),
         "q1": qq["q1"].astype("float64"), "q1_ly": qq["q1_ly"].astype("float64"),
         "fallback": np.where(use_annual, aa["a_fallback"].astype("boolean").fillna(False),
@@ -152,6 +177,16 @@ def _first_reports(facts: pd.DataFrame) -> pd.DataFrame:
     d = facts[facts["period_start"].isna()]
     sort = ["filed", "accession"] if "accession" in d else ["filed"]
     return d.sort_values(sort).drop_duplicates("period_end", keep="first")
+
+
+def _average(known: dict[pd.Timestamp, float], ends: list[pd.Timestamp],
+             last: pd.Timestamp | None) -> float:
+    """Mean of the balance-sheet values of the (up to) five period ends ending at `last` within
+    AVG_WINDOW_DAYS."""
+    if last is None:
+        return math.nan
+    upto = [e for e in ends if e <= last][-5:]
+    return float(np.mean([known[e] for e in upto if (last - e).days <= AVG_WINDOW_DAYS]))
 
 
 def instant_steps(facts: pd.DataFrame, keep_updates: bool = False) -> pd.DataFrame:
@@ -174,10 +209,10 @@ def instant_steps(facts: pd.DataFrame, keep_updates: bool = False) -> pd.DataFra
         for end, value in zip(batch["period_end"], batch["value"], strict=True):
             known[end] = float(value)
             when[end] = filed
-        last = max(known)
-        recent = [e for e in sorted(known)[-5:] if (last - e).days <= AVG_WINDOW_DAYS]
-        rows.append((filed, last, known[last], float(np.mean([known[e] for e in recent])),
-                     when[last]))
+        ends = sorted(known)
+        last = ends[-1]
+        rows.append((filed, last, known[last], _average(known, ends, last),
+                     _average(known, ends, _year_ago_end(ends, last)), when[last]))
     return pd.DataFrame(rows, columns=INSTANT_COLUMNS)
 
 

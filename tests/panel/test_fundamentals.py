@@ -246,3 +246,24 @@ def test_quarter_reported_directly_years_later_keeps_its_early_derived_value(tmp
         return load_fundamental_panels(cut_db, _entities(), dates, RULES).upto(end).frames
 
     assert_truncation_invariant(compute, ["2015-09-01", "2016-01-04", "2017-06-22"])
+
+
+def test_yoy_growth_pairs_the_ttm_with_the_four_quarters_a_year_earlier(tmp_path):
+    """Filings stop after eight quarters: a year later the TTM is still the last four quarters
+    (within the age limit). Growth must compare them with the four before, not with themselves."""
+    from analyzer.features.quality import quality_features
+    from analyzer.features.value import net_debt
+    rules = load_rules()
+    conn = _db(tmp_path)
+    _quarters(conn, "revenue", "us-gaap:Revenues", [10, 11, 12, 13, 14, 15, 16, 17])
+    _quarters(conn, "operating_income", "us-gaap:OperatingIncomeLoss", [1, 1, 1, 1, 2, 2, 2, 2])
+    conn.commit()
+    dates = pd.bdate_range("2021-01-01", "2023-03-31")
+    f = load_fundamental_panels(conn, _entities(), dates, RULES)
+    d = pd.Timestamp("2023-03-01")                       # > 1 year after the last filing
+    assert f["revenue_ttm"]["AAA"].loc[d] == 62 and f["revenue_ttm_ly"]["AAA"].loc[d] == 46
+    q = quality_features(f, net_debt(f), rules.features, rules.score)
+    assert abs(q.revenue_growth["AAA"].loc[d] - (62 / 46 - 1)) < 1e-6
+    assert abs(q.margin_change["AAA"].loc[d] - (8 / 62 - 4 / 46)) < 1e-6
+    first = f["revenue_ttm"]["AAA"].first_valid_index()
+    assert math.isnan(q.revenue_growth["AAA"].loc[first])   # no year-earlier TTM yet

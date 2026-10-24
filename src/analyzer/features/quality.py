@@ -1,7 +1,9 @@
 """Quality features (spec 5.2, without guidance tone) and their 0-1 sub-scores (spec 7.3).
 
-"One year earlier" is the panel value `year_days` trading days earlier: the figure as it was
-known then, so nothing here can look ahead."""
+"One year earlier" is the year-ago field of the same day (`revenue_ttm_ly`, `equity_avg_ly`, ...):
+the four quarters ending a year before the latest one (or the prior fiscal year), as known that
+day. A panel value shifted by a fixed number of days could pair periods that are not a year apart
+(or a period with itself, when filings stop), so it is not used."""
 
 from __future__ import annotations
 
@@ -54,12 +56,11 @@ class QualityFeatures:
 
 def quality_features(f: FundamentalPanels, net_debt: pd.DataFrame, features: FeatureRules,
                      score: ScoreRules) -> QualityFeatures:
-    year = features.year_days
-    rev = _f(f, "revenue_ttm")
-    revenue_growth = _growth(rev, rev.shift(year))
+    rev, rev_ly = _f(f, "revenue_ttm"), _f(f, "revenue_ttm_ly")
+    revenue_growth = _growth(rev, rev_ly)
     revenue_q_growth = _growth(_f(f, "revenue_q0"), _f(f, "revenue_q0_ly"))
     eps = _f(f, "eps_ttm")
-    eps_prev = eps.shift(year)
+    eps_prev = _f(f, "eps_ttm_ly")
     eps_growth = ((eps - eps_prev) / eps_prev.abs()).where(eps_prev != 0).clip(-1, 1)
     decline = ((_f(f, "revenue_q0") < _f(f, "revenue_q0_ly"))
                & (_f(f, "revenue_q1") < _f(f, "revenue_q1_ly")))
@@ -68,10 +69,11 @@ def quality_features(f: FundamentalPanels, net_debt: pd.DataFrame, features: Fea
                      & _f(f, "revenue_q1").notna() & _f(f, "revenue_q1_ly").notna())
 
     margin = (_f(f, "operating_income_ttm") / rev).where(rev > 0)
-    margin_change = margin - margin.shift(year)
+    margin_ly = (_f(f, "operating_income_ttm_ly") / rev_ly).where(rev_ly > 0)
+    margin_change = margin - margin_ly
 
     fcf = _f(f, "ocf_ttm") - _f(f, "capex_ttm")
-    fcf_prev = fcf.shift(year)
+    fcf_prev = _f(f, "ocf_ttm_ly") - _f(f, "capex_ttm_ly")
 
     ebitda = _ebitda(f)
     with np.errstate(divide="ignore", invalid="ignore"):
@@ -81,7 +83,9 @@ def quality_features(f: FundamentalPanels, net_debt: pd.DataFrame, features: Fea
 
     eq = _f(f, "equity_avg")
     roe = (_f(f, "net_income_ttm") / eq).where(eq > 0)
-    roe_change = roe - roe.shift(year)
+    eq_ly = _f(f, "equity_avg_ly")
+    roe_ly = (_f(f, "net_income_ttm_ly") / eq_ly).where(eq_ly > 0)
+    roe_change = roe - roe_ly
 
     with warnings.catch_warnings():  # an all-NaN slice gives NaN, which is what we want
         warnings.simplefilter("ignore", RuntimeWarning)

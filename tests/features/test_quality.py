@@ -26,10 +26,8 @@ def _q(f):
 
 
 def test_growth_and_margin_change_compare_with_a_year_earlier():
-    n = YEAR + 1
-    rev = [100.0] * YEAR + [120.0]
-    op = [10.0] * YEAR + [6.0]
-    q = _q(_fund(n, revenue_ttm=rev, operating_income_ttm=op))
+    q = _q(_fund(1, revenue_ttm=[120.0], revenue_ttm_ly=[100.0], operating_income_ttm=[6.0],
+                 operating_income_ttm_ly=[10.0]))
     assert abs(q.revenue_growth["A"].iloc[-1] - 0.20) < 1e-6
     assert abs(q.margin_change["A"].iloc[-1] - (0.05 - 0.10)) < 1e-6
     assert abs(q.growth_score["A"].iloc[-1] - 1.0) < 1e-6        # +20% = full credit
@@ -59,23 +57,20 @@ def test_net_debt_to_ebitda_handles_negative_ebitda():
     assert q.nd_ebitda["A"].iloc[1] == 10.0
 
 
+def _fcf(now, year_ago):
+    return _q(_fund(1, ocf_ttm=[now], ocf_ttm_ly=[year_ago], capex_ttm=[0.0], capex_ttm_ly=[0.0]))
+
+
 def test_fcf_score_levels():
-    n = YEAR + 1
-    q = _q(_fund(n, ocf_ttm=[10.0] * YEAR + [20.0], capex_ttm=[0.0] * n))
-    assert q.fcf_score["A"].iloc[-1] == 1.0
-    q = _q(_fund(n, ocf_ttm=[-10.0] * YEAR + [-20.0], capex_ttm=[0.0] * n))
-    assert q.fcf_score["A"].iloc[-1] == 0.0
+    assert _fcf(20.0, 10.0).fcf_score["A"].iloc[-1] == 1.0
+    assert _fcf(-20.0, -10.0).fcf_score["A"].iloc[-1] == 0.0
 
 
 def test_fcf_score_middle_levels_and_unknown_prior_year():
-    n = YEAR + 1
-    q = _q(_fund(n, ocf_ttm=[20.0] * YEAR + [10.0], capex_ttm=[0.0] * n))
-    assert q.fcf_score["A"].iloc[-1] == 0.5          # positive but falling
-    q = _q(_fund(n, ocf_ttm=[-20.0] * YEAR + [-10.0], capex_ttm=[0.0] * n))
-    assert q.fcf_score["A"].iloc[-1] == 0.25         # negative but improving
-    q = _q(_fund(n, ocf_ttm=[np.nan] * YEAR + [10.0], capex_ttm=[0.0] * n))
-    assert np.isnan(q.fcf_score["A"].iloc[-1])       # unknown prior year stays unknown
-    q = _q(_fund(n))
+    assert _fcf(10.0, 20.0).fcf_score["A"].iloc[-1] == 0.5           # positive but falling
+    assert _fcf(-10.0, -20.0).fcf_score["A"].iloc[-1] == 0.25        # negative but improving
+    assert np.isnan(_fcf(10.0, np.nan).fcf_score["A"].iloc[-1])      # unknown prior year
+    q = _q(_fund(1))
     assert np.isnan(q.fcf_score["A"].iloc[-1])
 
 
@@ -87,10 +82,10 @@ def test_nd_ebitda_is_nan_when_inputs_are_missing():
 
 
 def test_known_values_for_eps_roe_and_margin_scores():
-    n = YEAR + 1
-    q = _q(_fund(n, eps_ttm=[2.0] * YEAR + [2.5],
-                 net_income_ttm=[5.0] * YEAR + [6.25], equity_avg=[50.0] * n,
-                 revenue_ttm=[100.0] * n, operating_income_ttm=[10.0] * YEAR + [8.0]))
+    q = _q(_fund(1, eps_ttm=[2.5], eps_ttm_ly=[2.0], net_income_ttm=[6.25],
+                 net_income_ttm_ly=[5.0], equity_avg=[50.0], equity_avg_ly=[50.0],
+                 revenue_ttm=[100.0], revenue_ttm_ly=[100.0], operating_income_ttm=[8.0],
+                 operating_income_ttm_ly=[10.0]))
     assert abs(q.eps_growth["A"].iloc[-1] - 0.25) < 1e-6
     assert abs(q.roe_change["A"].iloc[-1] - 0.025) < 1e-6
     assert abs(q.roe_score["A"].iloc[-1] - 0.75) < 1e-6
@@ -119,7 +114,20 @@ def test_quality_is_truncation_invariant():
               capex_ttm=rng.uniform(0, 5, n), revenue_q0=rng.uniform(20, 30, n),
               revenue_q0_ly=rng.uniform(20, 30, n), revenue_q1=rng.uniform(20, 30, n),
               revenue_q1_ly=rng.uniform(20, 30, n), da_ttm=rng.uniform(0, 2, n),
-              debt=rng.uniform(0, 80, n), cash=rng.uniform(0, 20, n))
+              debt=rng.uniform(0, 80, n), cash=rng.uniform(0, 20, n),
+              **{f"{p}_ttm_ly": rng.uniform(1, 100, n) for p in
+                 ("revenue", "operating_income", "net_income", "eps", "ocf", "capex", "da")},
+              equity_avg_ly=rng.uniform(40, 60, n))
     d = f["revenue_ttm"].index
     assert_truncation_invariant(lambda end: _q(f if end is None else f.upto(end)),
                                 [d[YEAR + 5], d[YEAR + 20]])
+
+
+def test_year_ago_values_come_from_the_year_ago_fields_not_a_shifted_panel():
+    # filings stopped: the TTM is unchanged for over a year, which a shift(252) would read as
+    # "no growth" by comparing the period with itself; the year-ago field has the prior year
+    n = YEAR + 1
+    q = _q(_fund(n, revenue_ttm=[110.0] * n, revenue_ttm_ly=[100.0] * n,
+                 operating_income_ttm=[11.0] * n, operating_income_ttm_ly=[10.0] * n))
+    assert abs(q.revenue_growth["A"].iloc[-1] - 0.10) < 1e-6
+    assert abs(q.margin_change["A"].iloc[-1]) < 1e-6

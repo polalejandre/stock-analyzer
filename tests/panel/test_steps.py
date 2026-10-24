@@ -408,3 +408,63 @@ def test_same_day_candidates_for_one_quarter_do_not_depend_on_input_order():
     for rows in (f, f.iloc[::-1]):
         s = quarter_steps(quarter_candidates(rows))
         assert s["q0"].tolist() == [8576]
+
+
+# ---- final review I2: year-ago values are the same figure a year earlier -------------------------
+
+EIGHT = _q([(f"{y}-{m:02d}-01", e, v, f)
+            for (y, m, e, v, f) in [
+                (2022, 1, "2022-03-31", 1, "2022-05-01"), (2022, 4, "2022-06-30", 2, "2022-08-01"),
+                (2022, 7, "2022-09-30", 3, "2022-11-01"), (2022, 10, "2022-12-31", 4, "2023-02-15"),
+                (2023, 1, "2023-03-31", 10, "2023-05-01"), (2023, 4, "2023-06-30", 20, "2023-08-01"),
+                (2023, 7, "2023-09-30", 30, "2023-11-01"), (2023, 10, "2023-12-31", 40, "2024-02-15")]])
+
+
+def test_quarter_ttm_ly_sums_the_four_quarters_a_year_before_q0():
+    s = quarter_steps(EIGHT).set_index("filed")
+    assert s.loc[T("2024-02-15"), "ttm"] == 100 and s.loc[T("2024-02-15"), "ttm_ly"] == 10
+    assert s.loc[T("2023-11-01"), "ttm"] == 64 and math.isnan(s.loc[T("2023-11-01"), "ttm_ly"])
+    assert math.isnan(s.loc[T("2023-02-15"), "ttm_ly"])        # nothing a year before
+
+
+def test_ttm_ly_never_compares_a_period_with_itself():
+    s = quarter_steps(EIGHT)
+    pair = s.dropna(subset=["ttm", "ttm_ly"])
+    assert len(pair) and (pair["ttm"] != pair["ttm_ly"]).all()
+    # the year-ago TTM always ends ~365 days before the TTM it is paired with
+    gap = quarter_steps(EIGHT.drop(index=3))                     # 2022-12-31 missing
+    assert math.isnan(gap.set_index("filed").loc[T("2024-02-15"), "ttm_ly"])
+
+
+def test_annual_ttm_ly_is_the_prior_fiscal_year():
+    s = annual_steps(FULL_FACTS).set_index("filed")
+    assert math.isnan(s.loc[T("2023-02-20"), "ttm_ly"])
+    assert s.loc[T("2024-02-20"), "ttm_ly"] == 100                # first report of FY2022
+    assert s.loc[T("2025-02-20"), "ttm_ly"] == 120
+
+
+def test_combine_carries_the_year_ago_value_of_the_path_used():
+    q = quarter_steps(EIGHT)
+    a = annual_steps(_facts([("2023-01-01", "2023-12-31", 500, "2024-01-10"),
+                             ("2024-01-01", "2024-12-31", 700, "2025-02-20")]))
+    c = combine_ttm(q, a).set_index("filed")
+    assert not c.loc[T("2024-02-15"), "annual"] and c.loc[T("2024-02-15"), "ttm_ly"] == 10
+    assert c.loc[T("2025-02-20"), "annual"] and c.loc[T("2025-02-20"), "ttm_ly"] == 500
+
+
+def test_instant_avg5_ly_averages_the_dates_ending_a_year_earlier():
+    f = _facts([(None, e, v, fl) for e, v, fl in [
+        ("2022-03-31", 10, "2022-05-01"), ("2022-06-30", 20, "2022-08-01"),
+        ("2022-09-30", 30, "2022-11-01"), ("2022-12-31", 40, "2023-02-15"),
+        ("2023-03-31", 50, "2023-05-01"), ("2023-06-30", 60, "2023-08-01")]])
+    s = instant_steps(f).set_index("filed")
+    assert s.loc[T("2023-05-01"), "avg5_ly"] == 10                # only 2022-03-31 by then
+    assert s.loc[T("2023-08-01"), "avg5_ly"] == 15                # 2022-03-31 and 2022-06-30
+    assert s.loc[T("2023-08-01"), "avg5"] == 40
+    assert math.isnan(s.loc[T("2022-08-01"), "avg5_ly"])
+
+
+def test_year_ago_steps_truncation_invariant():
+    _assert_invariant(quarter_steps, [EIGHT], ["2023-05-01", "2023-11-01", "2024-02-15"])
+    _assert_invariant(lambda q, f: combine_ttm(quarter_steps(q), annual_steps(f)),
+                      [EIGHT, FULL_FACTS], ["2023-05-01", "2024-02-15", "2024-02-20", "2025-02-20"])
