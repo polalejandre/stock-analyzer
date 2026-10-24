@@ -40,6 +40,7 @@ class QualityFeatures:
     revenue_q_growth: pd.DataFrame
     eps_growth: pd.DataFrame
     revenue_decline_2q: pd.DataFrame
+    revenue_decline_known: pd.DataFrame
     margin_change: pd.DataFrame
     fcf: pd.DataFrame
     fcf_prev: pd.DataFrame
@@ -62,6 +63,9 @@ def quality_features(f: FundamentalPanels, net_debt: pd.DataFrame, features: Fea
     eps_growth = ((eps - eps_prev) / eps_prev.abs()).where(eps_prev != 0).clip(-1, 1)
     decline = ((_f(f, "revenue_q0") < _f(f, "revenue_q0_ly"))
                & (_f(f, "revenue_q1") < _f(f, "revenue_q1_ly")))
+    # decline is False when an input is missing; this says whether the rule could be evaluated
+    decline_known = (_f(f, "revenue_q0").notna() & _f(f, "revenue_q0_ly").notna()
+                     & _f(f, "revenue_q1").notna() & _f(f, "revenue_q1_ly").notna())
 
     margin = (_f(f, "operating_income_ttm") / rev).where(rev > 0)
     margin_change = margin - margin.shift(year)
@@ -85,10 +89,10 @@ def quality_features(f: FundamentalPanels, net_debt: pd.DataFrame, features: Fea
                                         eps_growth.to_numpy()]), axis=0)
     growth_score = _scaled(pd.DataFrame(growth_x, index=rev.index, columns=rev.columns),
                            score.growth_scale)
-    rising = fcf >= fcf_prev  # False when last year's value is unknown
+    rising = fcf >= fcf_prev  # only meaningful where both are known; NaN score otherwise
     fcf_score = pd.DataFrame(np.where(fcf > 0, np.where(rising, 1.0, 0.5),
                                       np.where(rising, 0.25, 0.0)),
-                             index=rev.index, columns=rev.columns).where(fcf.notna())
+                             index=rev.index, columns=rev.columns).where(fcf.notna() & fcf_prev.notna())
 
     def f32(x: pd.DataFrame) -> pd.DataFrame:  # full-universe panels: halve the memory
         return x.astype("float32")
@@ -96,6 +100,7 @@ def quality_features(f: FundamentalPanels, net_debt: pd.DataFrame, features: Fea
     return QualityFeatures(
         revenue_growth=f32(revenue_growth), revenue_q_growth=f32(revenue_q_growth),
         eps_growth=f32(eps_growth), revenue_decline_2q=decline.astype(bool),
+        revenue_decline_known=decline_known.astype(bool),
         margin_change=f32(margin_change), fcf=f32(fcf), fcf_prev=f32(fcf_prev),
         nd_ebitda=f32(nd_ebitda), roe_change=f32(roe_change), growth_score=f32(growth_score),
         margin_score=f32(_scaled(margin_change, score.margin_scale)),

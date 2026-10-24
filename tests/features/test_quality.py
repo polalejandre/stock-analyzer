@@ -3,6 +3,7 @@ import pandas as pd
 
 from analyzer.config import load_rules
 from analyzer.features.quality import balance_score, quality_features
+from analyzer.features.value import net_debt
 from analyzer.panel.fundamentals import FIELDS, FLAGS, FundamentalPanels
 from tests.panel_fixtures import assert_truncation_invariant
 
@@ -21,7 +22,6 @@ def _fund(n, **series):
 
 
 def _q(f):
-    from analyzer.features.value import net_debt
     return quality_features(f, net_debt(f), RULES.features, RULES.score)
 
 
@@ -40,6 +40,16 @@ def test_revenue_decline_needs_both_quarters_down():
     assert not q.revenue_decline_2q["A"].iloc[0]
     q = _q(_fund(1, revenue_q0=[9.0], revenue_q0_ly=[10.0], revenue_q1=[9.0], revenue_q1_ly=[10.0]))
     assert q.revenue_decline_2q["A"].iloc[0]
+    assert q.revenue_decline_known["A"].iloc[0]
+
+
+def test_revenue_decline_known_is_false_when_any_quarter_is_missing():
+    q = _q(_fund(1, revenue_q0=[9.0], revenue_q0_ly=[10.0], revenue_q1=[np.nan],
+                 revenue_q1_ly=[10.0]))
+    assert not q.revenue_decline_2q["A"].iloc[0]
+    assert not q.revenue_decline_known["A"].iloc[0]
+    assert q.revenue_decline_2q.dtypes.iloc[0] == np.bool_
+    assert q.revenue_decline_known.dtypes.iloc[0] == np.bool_
 
 
 def test_net_debt_to_ebitda_handles_negative_ebitda():
@@ -57,6 +67,44 @@ def test_fcf_score_levels():
     assert q.fcf_score["A"].iloc[-1] == 0.0
 
 
+def test_fcf_score_middle_levels_and_unknown_prior_year():
+    n = YEAR + 1
+    q = _q(_fund(n, ocf_ttm=[20.0] * YEAR + [10.0], capex_ttm=[0.0] * n))
+    assert q.fcf_score["A"].iloc[-1] == 0.5          # positive but falling
+    q = _q(_fund(n, ocf_ttm=[-20.0] * YEAR + [-10.0], capex_ttm=[0.0] * n))
+    assert q.fcf_score["A"].iloc[-1] == 0.25         # negative but improving
+    q = _q(_fund(n, ocf_ttm=[np.nan] * YEAR + [10.0], capex_ttm=[0.0] * n))
+    assert np.isnan(q.fcf_score["A"].iloc[-1])       # unknown prior year stays unknown
+    q = _q(_fund(n))
+    assert np.isnan(q.fcf_score["A"].iloc[-1])
+
+
+def test_nd_ebitda_is_nan_when_inputs_are_missing():
+    q = _q(_fund(2, operating_income_ttm=[np.nan, 10.0], da_ttm=[0.0, 0.0],
+                 debt=[100.0, 100.0], cash=[0.0, 0.0], equity=[50.0, np.nan]))
+    assert np.isnan(q.nd_ebitda["A"].iloc[0])        # ebitda unknown
+    assert np.isnan(q.nd_ebitda["A"].iloc[1])        # no balance sheet: net debt unknown
+
+
+def test_known_values_for_eps_roe_and_margin_scores():
+    n = YEAR + 1
+    q = _q(_fund(n, eps_ttm=[2.0] * YEAR + [2.5],
+                 net_income_ttm=[5.0] * YEAR + [6.25], equity_avg=[50.0] * n,
+                 revenue_ttm=[100.0] * n, operating_income_ttm=[10.0] * YEAR + [8.0]))
+    assert abs(q.eps_growth["A"].iloc[-1] - 0.25) < 1e-6
+    assert abs(q.roe_change["A"].iloc[-1] - 0.025) < 1e-6
+    assert abs(q.roe_score["A"].iloc[-1] - 0.75) < 1e-6
+    assert abs(q.margin_score["A"].iloc[-1] - 0.3) < 1e-6
+
+
+def test_outputs_are_float32_except_the_flags():
+    q = _q(_fund(YEAR + 1, revenue_ttm=[100.0] * (YEAR + 1)))
+    for name in ("revenue_growth", "revenue_q_growth", "eps_growth", "margin_change", "fcf",
+                 "fcf_prev", "nd_ebitda", "roe_change", "growth_score", "margin_score",
+                 "roe_score", "fcf_score"):
+        assert (getattr(q, name).dtypes == np.float32).all(), name
+
+
 def test_balance_score_is_linear_between_one_and_the_cap():
     s = balance_score(pd.DataFrame({"A": [0.5, 2.5, 4.0, np.inf]}), cap=4.0)
     assert s["A"].tolist() == [1.0, 0.5, 0.0, 0.0]
@@ -66,7 +114,12 @@ def test_quality_is_truncation_invariant():
     n = YEAR + 30
     rng = np.random.default_rng(2)
     f = _fund(n, revenue_ttm=rng.uniform(90, 110, n), operating_income_ttm=rng.uniform(5, 15, n),
-              net_income_ttm=rng.uniform(1, 9, n), equity_avg=[50.0] * n, equity=[50.0] * n)
+              net_income_ttm=rng.uniform(1, 9, n), equity_avg=[50.0] * n, equity=[50.0] * n,
+              eps_ttm=rng.uniform(1, 3, n), ocf_ttm=rng.uniform(-5, 20, n),
+              capex_ttm=rng.uniform(0, 5, n), revenue_q0=rng.uniform(20, 30, n),
+              revenue_q0_ly=rng.uniform(20, 30, n), revenue_q1=rng.uniform(20, 30, n),
+              revenue_q1_ly=rng.uniform(20, 30, n), da_ttm=rng.uniform(0, 2, n),
+              debt=rng.uniform(0, 80, n), cash=rng.uniform(0, 20, n))
     d = f["revenue_ttm"].index
     assert_truncation_invariant(lambda end: _q(f if end is None else f.upto(end)),
                                 [d[YEAR + 5], d[YEAR + 20]])
