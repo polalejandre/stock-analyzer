@@ -209,6 +209,8 @@ def total_debt(long_term: pd.DataFrame, short_term: pd.DataFrame) -> pd.DataFram
     for r in m.itertuples():
         has_l, has_s = pd.notna(r.value_l), pd.notna(r.value_s)
         if has_l and has_s and r.tag_l == TOTAL_DEBT_TAG and r.tag_s not in SEPARATE_SHORT_TAGS:
+            if r.filed_s < r.filed_l:     # only the short line is known until the long one lands
+                rows.append((r.period_end, float(r.value_s), r.filed_s))
             rows.append((r.period_end, float(r.value_l), r.filed_l))
         elif has_l and has_s:
             first, second = sorted([(r.filed_l, float(r.value_l)), (r.filed_s, float(r.value_s))])

@@ -317,3 +317,12 @@ def test_first_version_quarters_truncation_invariant():
     for d in map(T, cuts):
         _same(full, build(_upto(REREPORT, d)), d)
     assert full.set_index("filed").loc[T("2024-02-15"), "ttm"] == 46
+
+
+def test_debt_overlap_with_short_line_first_is_truncation_invariant():
+    ltd = _facts([(None, "2019-12-31", 100, "2021-02-15")], tag="us-gaap:LongTermDebt")
+    cur = _facts([(None, "2019-12-31", 10, "2020-02-15")], tag="us-gaap:LongTermDebtCurrent")
+    d = total_debt(ltd, cur)
+    assert d["value"].tolist() == [10, 100]
+    assert d["filed"].tolist() == [T("2020-02-15"), T("2021-02-15")]
+    _assert_invariant(total_debt, [ltd, cur], ["2020-02-15", "2020-06-01", "2021-02-15"])
