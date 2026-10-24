@@ -100,6 +100,8 @@ def run_research(conn, rules: Rules, period: str, out_root: Path, *, panels=None
     events.loc[is_setup, "reasons"] = [" | ".join(reasons(r, rules))
                                        for r in events[is_setup].to_dict("records")]
     events["has_missing"] = events.get("missing", pd.Series(0, index=events.index)).fillna(0) > 0
+    # every group (dislocated_all rows carry no regime of their own): the regime of the event day
+    events["regime"] = ev.regime.reindex(pd.DatetimeIndex(events["date"])).fillna("unknown").to_numpy()
 
     chosen = events[events["period"] == key]
     groups = {g: chosen[chosen["group"] == g] for g in (GROUP_SETUP, GROUP_DISLOCATED,
@@ -126,9 +128,15 @@ def run_research(conn, rules: Rules, period: str, out_root: Path, *, panels=None
         "plan_outcomes": {p: groups[GROUP_SETUP][f"{p}_outcome"].value_counts().to_dict()
                           for p in ("swing", "position") if f"{p}_outcome" in groups[GROUP_SETUP]},
         "coverage": coverage(conn, panels, ev),
+        "regime_known_share": {g: _known_share(e) for g, e in groups.items()},
     }
     (out_dir / "summary.json").write_text(json.dumps(summary, indent=2, default=_json))
     return RunResult(run_id, out_dir, summary)
+
+
+def _known_share(events: pd.DataFrame) -> float:
+    """Share of the period's event days whose liquidity regime is known."""
+    return float((events["regime"] != "unknown").mean()) if len(events) else float("nan")
 
 
 def _json(value):

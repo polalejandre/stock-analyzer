@@ -191,6 +191,7 @@ class ResearchRules:
 class RegimeRules:
     loose_min: int
     tight_max: int
+    min_known: int
     median_window: int
     change_window: int
     yoy_window: int

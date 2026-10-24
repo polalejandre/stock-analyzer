@@ -205,6 +205,8 @@ def research_run(
     typer.echo(f"aliases: {cov['aliases']}")
     typer.echo(f"skipped ticker-days by reason: {cov['skipped_ticker_days']}")
     typer.echo(f"reference-ETF fallback ticker-days: {cov['ref_fallback_days']}")
+    typer.echo("event days with a known regime: " + ", ".join(
+        f"{g} {share:.0%}" for g, share in s["regime_known_share"].items()))
     for group, g in s["groups"].items():
         typer.echo(f"{group:15} n={g['n']:<6} median 63d excess vs SPY={g['median_xs_spy']:+.2%} "
                    f"win rate={g['win_rate']:.1%}")

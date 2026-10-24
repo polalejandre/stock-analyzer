@@ -33,6 +33,11 @@ def test_in_sample_run_writes_outputs(setup):
     assert summary["period"] == "in_sample" and summary["guidance_tone_enabled"] is False
     assert summary["groups"]["setup"]["n"] >= 1
     assert summary["verdict"]["tests"]["n"] is False          # far fewer than 100 events
+    events_all = pd.read_csv(res.out_dir / "events.csv")
+    assert events_all["regime"].notna().all()               # dislocated_all events too
+    for group, share in summary["regime_known_share"].items():
+        chosen = events_all[(events_all.group == group) & (events_all.period == "in_sample")]
+        assert share == pytest.approx((chosen["regime"] != "unknown").mean())
     events = pd.read_csv(res.out_dir / "events.csv")
     setup_row = events[(events.group == "setup") & (events.period == "in_sample")].iloc[0]
     assert setup_row["symbol"] == DIP and "percentile" in setup_row["reasons"]

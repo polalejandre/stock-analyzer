@@ -124,6 +124,7 @@ def test_regime_rules_load():
     rules = load_rules(PROJECT_ROOT / "rules.toml")
     assert rules.regime.loose_min == 4
     assert rules.regime.tight_max == 2
+    assert rules.regime.min_known == 5
     assert rules.regime.median_window == 756
     assert rules.regime.change_window == 65
     assert rules.regime.yoy_window == 252
