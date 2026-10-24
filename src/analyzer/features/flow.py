@@ -37,12 +37,17 @@ def etf_flow_codes(etf: PricePanels, spy_adj: pd.Series, active: pd.DataFrame,
     trend = (dv.rolling(rules.dv_short, min_periods=rules.dv_short).mean()
              / dv.rolling(rules.dv_long, min_periods=rules.dv_long).mean())
     mask = active.reindex(index=rs.index, columns=rs.columns).fillna(False).astype(bool)
-    rank = rs.where(mask).rank(axis=1, pct=True)
-    hot = (rank >= rules.hot_rank) & (trend > rules.hot_dv_trend)
-    cold = rank <= rules.cold_rank
+    ranked = rs.where(mask)
+    n = ranked.notna().sum(axis=1)
+    top = ranked.rank(axis=1, ascending=False, method="min")
+    bottom = ranked.rank(axis=1, ascending=True, method="min")
+    eps = 1e-9                                   # rank / n <= q, free of float noise
+    hot = top.le(n * (1 - rules.hot_rank) + eps, axis=0) & (trend > rules.hot_dv_trend)
+    cold = bottom.le(n * rules.cold_rank + eps, axis=0)
     codes = pd.DataFrame(np.where(hot, HOT, np.where(cold, COLD, NEUTRAL)),
                          index=rs.index, columns=rs.columns)
-    return codes.where(rank.notna())
+    enough = (n >= rules.flow_min_industries).to_numpy()[:, None]
+    return codes.where(ranked.notna() & enough)
 
 
 def stock_codes(codes: pd.DataFrame, ref_of: Mapping[str, str], columns: Sequence[str]) -> pd.DataFrame:
@@ -65,7 +70,7 @@ def flow(prices: PricePanels, etf: PricePanels, spy_adj: pd.Series, eligible: pd
     active = active_etfs(eligible, ref_of, list(etf.close.columns))
     industry = stock_codes(etf_flow_codes(etf, spy_adj, active, rules), ref_of, close.columns)
 
-    change = close.diff()
+    change = prices.adj_close.diff()
     vol = volume.to_numpy(dtype="float64")
     since = since_high.reindex_like(close).to_numpy(dtype="float64")
     w = rules.high_window
@@ -82,7 +87,7 @@ def flow(prices: PricePanels, etf: PricePanels, spy_adj: pd.Series, eligible: pd
     obv_div = bullish_divergence(pairs, rules.divergence_lookback)
 
     span = rules.accumulation_high - rules.accumulation_low
-    ratio_score = ((ratio - rules.accumulation_low) / span).clip(0, 1).fillna(0.0)
+    ratio_score = ((ratio - rules.accumulation_low) / span).clip(0, 1).fillna(0.5)
     accumulation = 0.5 * ratio_score + 0.5 * obv_div.astype(float)
     return Flow(industry=industry, updown_ratio=ratio, obv_divergence=obv_div,
                 accumulation=accumulation)

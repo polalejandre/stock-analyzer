@@ -1,6 +1,6 @@
 # Every threshold and weight used by the engine. Bump `version` whenever any value changes.
 # Phase-2 values are starting values; they are tuned on the in-sample period only (spec 9.2).
-version = "2026.10.24-1"
+version = "2026.10.24-2"
 
 [universe]
 min_dollar_volume = 25_000_000      # average close × volume over `dollar_volume_days`, USD
@@ -33,6 +33,7 @@ dv_short = 20
 dv_long = 120
 hot_rank = 0.8                      # top 20% of industries by relative strength
 cold_rank = 0.2
+flow_min_industries = 5             # fewer ranked industries than this: flow tag unknown
 hot_dv_trend = 1.2
 accumulation_low = 0.8              # up/down volume ratio that scores 0
 accumulation_high = 1.4             # up/down volume ratio that scores 1

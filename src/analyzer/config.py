@@ -100,6 +100,7 @@ class FeatureRules:
     dv_long: int
     hot_rank: float
     cold_rank: float
+    flow_min_industries: int
     hot_dv_trend: float
     accumulation_low: float
     accumulation_high: float
